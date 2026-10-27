@@ -58,7 +58,7 @@ NS=$(oci os ns get --query data --raw-output 2>/dev/null)
 oci os bucket get -bn vpn-deploy >/dev/null 2>&1 || oci os bucket create -c $T --name vpn-deploy --public-access-type NoPublicAccess >/dev/null
 OBJ="applist-$(openssl rand -hex 12).tgz"
 oci os object put -bn vpn-deploy --name $OBJ --file "$B/bundle.tgz" --force >/dev/null 2>&1 || { echo "upload failed"; rm -rf "$B"; exit 1; }
-EXP=$(date -u -d '+20 min' +%Y-%m-%dT%H:%M:%SZ)
+EXP=$(date -u -d '+20 min' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+20M +%Y-%m-%dT%H:%M:%SZ)
 PAR=$(oci os preauth-request create -bn vpn-deploy --name $OBJ --access-type ObjectRead --object-name $OBJ --time-expires $EXP 2>/dev/null)
 URL="https://objectstorage.$REGION.oraclecloud.com$(echo "$PAR" | jq -r '.data."access-uri"')"; PARID=$(echo "$PAR" | jq -r .data.id)
 cleanup() { oci os preauth-request delete -bn vpn-deploy --par-id $PARID --force >/dev/null 2>&1; oci os object delete -bn vpn-deploy --name $OBJ --force >/dev/null 2>&1; rm -rf "$B"; }
