@@ -4,7 +4,6 @@ import 'package:http/testing.dart';
 import 'package:obtainium/custom_errors.dart';
 import 'package:obtainium/providers/apps_provider_server_sync.dart';
 import 'package:obtainium/providers/source_provider.dart';
-import 'package:obtainium/services/http_service.dart';
 import 'package:obtainium/services/server_sync_service.dart';
 
 App _app(String id, String url) => App(
