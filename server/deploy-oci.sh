@@ -97,6 +97,11 @@ https://$DOMAIN:$HTTPS_PORT {
 	}
 	reverse_proxy 127.0.0.1:$APP_PORT
 }
+
+# Caddy's automatic redirect drops the port and would send clients to 443 (the VPN).
+http:// {
+	redir https://$DOMAIN:$HTTPS_PORT{uri} permanent
+}
 EOF
 tar -C "$B" -czf "$B/bundle.tgz" app
 
