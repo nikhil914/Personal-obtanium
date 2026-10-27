@@ -79,6 +79,8 @@ cat > "$B/app/Caddyfile" <<EOF
 {
 	http_port 80
 	https_port $HTTPS_PORT
+	# Its automatic redirect drops the port and would send clients to 443 (the VPN); see http:// below.
+	auto_https disable_redirects
 	servers {
 		timeouts {
 			read_header 10s
@@ -98,7 +100,6 @@ https://$DOMAIN:$HTTPS_PORT {
 	reverse_proxy 127.0.0.1:$APP_PORT
 }
 
-# Caddy's automatic redirect drops the port and would send clients to 443 (the VPN).
 http:// {
 	redir https://$DOMAIN:$HTTPS_PORT{uri} permanent
 }
