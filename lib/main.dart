@@ -256,8 +256,8 @@ class _ObtainiumState extends State<Obtainium> {
                     App(
                       id: obtainiumId,
                       url: obtainiumUrl,
-                      author: 'ImranR98',
-                      name: 'Obtainium',
+                      author: 'nikhil914',
+                      name: 'Personal Obtainium',
                       installedVersion: value!.versionName,
                       latestVersion: value.versionName!,
                       apkUrls: [],
@@ -266,6 +266,7 @@ class _ObtainiumState extends State<Obtainium> {
                         'versionDetection': true,
                         'apkFilterRegEx': 'fdroid',
                         'invertAPKFilter': true,
+                        'autoApkFilterByArch': true,
                       },
                       lastUpdateCheck: null,
                       pinned: false,
@@ -385,7 +386,7 @@ class _ObtainiumState extends State<Obtainium> {
         }
 
         return MaterialApp(
-          title: 'Obtainium',
+          title: 'Personal Obtainium',
           navigatorKey: appNavigatorKey,
           localizationsDelegates: [
             ...context.localizationDelegates,
