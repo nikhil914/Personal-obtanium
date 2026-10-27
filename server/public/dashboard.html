@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>App lists</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --text: #1b1f24; --muted: #5f6b7a; --line: #e2e6eb;
+    --accent: #2563eb; --accent-soft: #e8efff; --danger: #c62828; --ok: #1b7f3b; --warn: #a15c00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111418; --card: #1a1f25; --text: #e6e9ed; --muted: #95a1af; --line: #2b323a;
+      --accent: #6b9bff; --accent-soft: #1d2a44; --danger: #ff6b6b; --ok: #4cc27a; --warn: #f0a640;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 16px; }
+  code { background: var(--card); border: 1px solid var(--line); padding: 1px 6px; border-radius: 4px; word-break: break-all; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tab { border-radius: 999px; }
+  .tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+  .head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .head h2 { font-size: 18px; margin: 0; flex: 1; min-width: 0; }
+  .feed { margin: 8px 0 0; color: var(--muted); font-size: 14px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  form { display: flex; gap: 8px; flex-wrap: wrap; }
+  input { flex: 1 1 220px; min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); font: inherit; }
+  input.short { flex: 0 1 160px; }
+  button { padding: 8px 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--text); font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--danger); }
+  button.small { padding: 4px 9px; font-size: 13px; }
+  button:disabled { opacity: .4; cursor: default; }
+  #msg { min-height: 22px; margin: 8px 2px; color: var(--muted); }
+  #msg.err { color: var(--danger); }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 8px; display: flex; gap: 10px; align-items: center; }
+  .num { color: var(--muted); width: 22px; text-align: right; flex: none; }
+  .info { flex: 1; min-width: 0; }
+  .info a { color: var(--accent); text-decoration: none; word-break: break-all; }
+  .meta { font-size: 13px; color: var(--muted); }
+  .meta .ok { color: var(--ok); } .meta .warn { color: var(--warn); }
+  .actions { display: flex; gap: 4px; flex: none; }
+  .actions button { padding: 6px 9px; }
+  .empty { color: var(--muted); justify-content: center; }
+  details summary { cursor: pointer; color: var(--muted); margin: 4px 0 8px; }
+  @media (max-width: 520px) { li { flex-wrap: wrap; } .actions { width: 100%; justify-content: flex-end; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>App lists</h1>
+  <p class="sub">Each device category has its own list. A device reads its list each time the app opens, so changes reach it on the next open.</p>
+
+  <div class="tabs" id="tabs"></div>
+
+  <details id="newListBox" class="panel">
+    <summary>New list</summary>
+    <form id="newList">
+      <input id="newId" class="short" placeholder="Id, e.g. 2" autocomplete="off" required>
+      <input id="newName" placeholder="Name, e.g. Phone" autocomplete="off">
+      <button class="primary" type="submit">Create list</button>
+    </form>
+  </details>
+
+  <section id="current"></section>
+  <div id="msg"></div>
+  <ul id="list"></ul>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let lists = [];
+let listKey = null;
+let appKeyRequired = false;
+let currentId = null;
+const releaseCache = {};
+
+try { currentId = localStorage.getItem('currentList'); } catch {}
+
+function say(text, isErr) { $('msg').textContent = text || ''; $('msg').className = isErr ? 'err' : ''; }
+
+async function api(method, path, body) {
+  const res = await fetch('/api/lists' + path, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+    credentials: 'same-origin',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  lists = data.lists;
+  listKey = data.listKey;
+  appKeyRequired = !!data.appKeyRequired;
+  render();
+  return data;
+}
+
+const current = () => lists.find((l) => l.id === currentId);
+const enc = encodeURIComponent;
+
+function select(id) {
+  currentId = id;
+  try { localStorage.setItem('currentList', id); } catch {}
+  say('');
+  render();
+}
+
+function el(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  Object.assign(e, props || {});
+  for (const k of kids) if (k != null) e.append(k);
+  return e;
+}
+
+function button(label, title, disabled, onClick, cls) {
+  const b = el('button', { type: 'button', textContent: label, title, disabled, className: cls || '' });
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+function render() {
+  if (!current() && lists.length) currentId = lists[0].id;
+
+  const tabs = $('tabs');
+  tabs.textContent = '';
+  lists.forEach((l) => {
+    tabs.append(button(l.name + ' (' + l.apps.length + ')', 'List ' + l.id, false, () => select(l.id),
+      'tab' + (l.id === currentId ? ' active' : '')));
+  });
+  if (!lists.length) $('newListBox').open = true;
+
+  const cur = current();
+  const head = $('current');
+  head.textContent = '';
+  $('list').textContent = '';
+  if (!cur) { head.append(el('p', { className: 'sub', textContent: 'No lists yet. Create one above.' })); return; }
+
+  const feedUrl = location.origin + '/apps/' + enc(cur.id) + (listKey ? '?key=' + enc(listKey) : '');
+  const copy = button('Copy', 'Copy link', false, async () => {
+    try { await navigator.clipboard.writeText(feedUrl); say('Link copied.'); } catch { say(feedUrl); }
+  }, 'small');
+  const idx = lists.indexOf(cur);
+  head.append(el('div', { className: 'panel' },
+    el('div', { className: 'head' },
+      el('h2', { textContent: cur.name }),
+      button('←', 'Move list left', idx === 0, () => moveList(idx, -1), 'small'),
+      button('→', 'Move list right', idx === lists.length - 1, () => moveList(idx, 1), 'small'),
+      button('Rename', 'Rename this list', false, renameList, 'small'),
+      button('Delete list', 'Delete this list', false, deleteList, 'small danger')),
+    el('div', { className: 'feed' }, 'Server sync URL for these devices:', el('code', { textContent: feedUrl }), copy),
+    el('div', { className: 'feed' }, 'Short form to type in the app:', el('code', { textContent: cur.id + (listKey ? '/' + listKey : '') }),
+      cur.id === (lists[0] && lists[0].id) ? ' (or leave the built-in URL if it points here)' : ''),
+    appKeyRequired ? el('div', { className: 'feed', textContent: 'Only the Personal Obtainium app can open these URLs; a browser gets 404.' }) : null,
+    listKey ? null : el('div', { className: 'feed', textContent: 'Warning: LIST_KEY is not set, so anyone who guesses this URL can read the list.' }),
+    addForm()));
+
+  if (!cur.apps.length) {
+    $('list').append(el('li', { className: 'empty', textContent: 'No apps in this list yet. Add a GitHub link above.' }));
+    return;
+  }
+  cur.apps.forEach((app, i) => {
+    const status = el('span');
+    const meta = el('div', { className: 'meta' }, status, app.settings ? ' · custom settings' : null);
+    const info = el('div', { className: 'info' },
+      app.note ? el('div', { textContent: app.note, style: 'font-weight:600' }) : null,
+      el('a', { href: app.url, target: '_blank', rel: 'noopener', textContent: app.url }),
+      meta);
+    const repo = ghRepo(app.url);
+    if (repo) { status.textContent = 'Checking releases…'; releaseInfo(repo, status); }
+    const others = lists.filter((l) => l !== cur && !l.apps.some((a) => a.url === app.url));
+    const actions = el('div', { className: 'actions' },
+      button('↑', 'Move up', i === 0, () => moveApp(i, -1)),
+      button('↓', 'Move down', i === cur.apps.length - 1, () => moveApp(i, 1)),
+      others.length ? button('Copy to…', 'Add to another list', false, () => copyTo(app, others)) : null,
+      button('Remove', 'Remove from this list', false, () => removeApp(app), 'danger'));
+    $('list').append(el('li', {}, el('span', { className: 'num', textContent: i + 1 }), info, actions));
+  });
+}
+
+function addForm() {
+  const url = el('input', { placeholder: 'https://github.com/owner/repo', autocomplete: 'off', required: true });
+  const note = el('input', { className: 'short', placeholder: 'Name (optional)', autocomplete: 'off' });
+  const form = el('form', { style: 'margin-top:12px' }, url, note, el('button', { className: 'primary', type: 'submit', textContent: 'Add app' }));
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const body = note.value.trim() ? { url: url.value.trim(), note: note.value.trim() } : { url: url.value.trim() };
+    try { await api('POST', '/' + enc(currentId) + '/apps', body); say('Added to ' + current().name + '.'); }
+    catch (e) { say(e.message, true); }
+  });
+  return form;
+}
+
+function ghRepo(url) {
+  const m = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)$/i);
+  return m ? m[1] + '/' + m[2] : null;
+}
+
+async function releaseInfo(repo, target) {
+  if (!releaseCache[repo]) {
+    releaseCache[repo] = fetch('https://api.github.com/repos/' + repo + '/releases/latest')
+      .then(async (r) => {
+        if (r.status === 404) return { text: 'No release yet', cls: 'warn' };
+        if (!r.ok) return { text: 'Release check unavailable (' + r.status + ')', cls: '' };
+        const d = await r.json();
+        const apks = (d.assets || []).filter((a) => /\.apk$/i.test(a.name));
+        const when = d.published_at ? new Date(d.published_at).toLocaleDateString() : '';
+        return apks.length
+          ? { text: 'Latest ' + d.tag_name + ' · ' + apks.length + ' APK' + (apks.length > 1 ? 's' : '') + (when ? ' · ' + when : ''), cls: 'ok' }
+          : { text: 'Latest ' + d.tag_name + ' has no APK attached', cls: 'warn' };
+      })
+      .catch(() => ({ text: 'Release check unavailable', cls: '' }));
+  }
+  const info = await releaseCache[repo];
+  target.textContent = info.text;
+  target.className = info.cls;
+}
+
+async function moveApp(i, delta) {
+  const next = current().apps.slice();
+  const [item] = next.splice(i, 1);
+  next.splice(i + delta, 0, item);
+  try { await api('PUT', '/' + enc(currentId) + '/apps', { apps: next }); say('Order saved.'); } catch (e) { say(e.message, true); }
+}
+
+async function moveList(i, delta) {
+  const order = lists.map((l) => l.id);
+  const [id] = order.splice(i, 1);
+  order.splice(i + delta, 0, id);
+  try { await api('PUT', '', { order }); say(lists[0].name + ' is also served at /apps.json.'); } catch (e) { say(e.message, true); }
+}
+
+async function removeApp(app) {
+  if (!confirm('Remove ' + app.url + ' from ' + current().name + '?\n\nThose devices stop tracking it on their next sync.')) return;
+  try { await api('DELETE', '/' + enc(currentId) + '/apps', { url: app.url }); say('Removed.'); } catch (e) { say(e.message, true); }
+}
+
+async function copyTo(app, others) {
+  const choice = prompt('Add ' + app.url + ' to which list?\n\n' + others.map((l) => l.id + ' = ' + l.name).join('\n') + '\n\nType the id:', others[0].id);
+  if (choice == null) return;
+  const target = others.find((l) => l.id === choice.trim().toLowerCase());
+  if (!target) return say('No list with id "' + choice + '".', true);
+  try { await api('POST', '/' + enc(target.id) + '/apps', app); say('Added to ' + target.name + '.'); } catch (e) { say(e.message, true); }
+}
+
+async function renameList() {
+  const name = prompt('New name for list ' + currentId + ':', current().name);
+  if (!name || !name.trim()) return;
+  try { await api('PATCH', '/' + enc(currentId), { name }); say('Renamed.'); } catch (e) { say(e.message, true); }
+}
+
+async function deleteList() {
+  const cur = current();
+  if (!confirm('Delete the list "' + cur.name + '" (' + cur.apps.length + ' apps)?\n\nDevices using /apps/' + cur.id + ' will get an error until you create it again.')) return;
+  try { await api('DELETE', '/' + enc(cur.id)); currentId = null; say('List deleted.'); } catch (e) { say(e.message, true); }
+}
+
+$('newList').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const id = $('newId').value.trim().toLowerCase();
+  const name = $('newName').value.trim();
+  try {
+    await api('POST', '', name ? { id, name } : { id });
+    $('newId').value = ''; $('newName').value = ''; $('newListBox').open = false;
+    select(id);
+    say('List created. Set the app on those devices to /apps/' + id + '.');
+  } catch (e) { say(e.message, true); }
+});
+
+api('GET', '').catch((e) => say(e.message, true));
+</script>
+</body>
+</html>

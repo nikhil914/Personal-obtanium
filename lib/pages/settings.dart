@@ -10,6 +10,7 @@ import 'package:obtainium/components/category_editor.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:obtainium/components/ui_widgets.dart';
 import 'package:obtainium/components/generated_form_renderer.dart';
+import 'package:obtainium/components/server_sync_runner.dart';
 import 'package:obtainium/custom_errors.dart';
 import 'package:obtainium/core/logging/app_logger.dart';
 import 'package:obtainium/installers/root_installer.dart';
@@ -21,6 +22,7 @@ import 'package:obtainium/providers/apps_provider.dart';
 import 'package:obtainium/providers/external_install_bridge.dart';
 import 'package:obtainium/providers/settings_provider.dart';
 import 'package:obtainium/providers/source_provider.dart';
+import 'package:obtainium/services/server_sync_service.dart';
 import 'package:obtainium/theme.dart';
 import 'package:obtainium/utils/update_health.dart';
 import 'package:obtainium/utils/locale_utils.dart';
@@ -290,7 +292,9 @@ class _SettingsPageState extends State<SettingsPage> {
 
     final bool showBgSection =
         settingsProvider.updateInterval > 0 &&
-        (sdk >= 30 || settingsProvider.useShizuku);
+        (sdk >= 30 ||
+            settingsProvider.useShizuku ||
+            settingsProvider.installerMode == InstallerMode.root.name);
 
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surface,
@@ -345,6 +349,19 @@ class _SettingsPageState extends State<SettingsPage> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               spacing: AppSpacings.connectedGap,
               children: shapeCardTiles([
+                _settingsRow(
+                  context,
+                  icon: Icons.cloud_sync_outlined,
+                  title: tr('serverSync'),
+                  subtitle: settingsProvider.serverSyncUrl.isEmpty
+                      ? tr('serverSyncUrlNotSet')
+                      : settingsProvider.serverSyncUrl,
+                  onTap: () => _pushPage(
+                    context,
+                    title: tr('serverSync'),
+                    childBuilder: (ctx) => _buildServerSyncSection(ctx),
+                  ),
+                ),
                 _settingsRow(
                   context,
                   icon: Icons.import_export,
@@ -464,6 +481,74 @@ class _SettingsPageState extends State<SettingsPage> {
           ],
         ),
       ],
+    );
+  }
+
+  Widget _buildServerSyncSection(BuildContext context) {
+    final settingsProvider = context.read<SettingsProvider>();
+    final children = <Widget>[
+      GeneratedForm(
+        tileMode: true,
+        joinedTiles: false,
+        items: [
+          [
+            GeneratedFormTextField(
+              'serverSyncUrl',
+              label: tr('serverSyncUrl'),
+              required: false,
+              hint: serverSyncUrlFromBuild.isEmpty
+                  ? 'https://example.com/apps/1?key=ab12'
+                  : '2  or  2/ab12',
+              additionalValidators: [
+                (value) {
+                  final v = value?.trim() ?? '';
+                  if (v.isEmpty) return null;
+                  if (resolveServerSyncUrl(v) == null) {
+                    return tr('invalidServerSyncUrl');
+                  }
+                  return null;
+                },
+              ],
+            )..value = settingsProvider.serverSyncUrl,
+          ],
+        ],
+        onValueChanges: (values, valid, isBuilding) {
+          if (valid && !isBuilding) {
+            final url = (values['serverSyncUrl'] as String?)?.trim() ?? '';
+            if (url != settingsProvider.serverSyncUrl) {
+              settingsProvider.serverSyncUrl = url;
+            }
+          }
+        },
+      ),
+      _caption(context, tr('serverSyncUrlHelp')),
+      ToggleTile(
+        label: tr('serverSyncOnStart'),
+        value: settingsProvider.serverSyncOnStart,
+        onChanged: (value) => settingsProvider.serverSyncOnStart = value,
+      ),
+      ToggleTile(
+        label: tr('preferRootWhenAvailable'),
+        value: settingsProvider.preferRootWhenAvailable,
+        onChanged: (value) => settingsProvider.preferRootWhenAvailable = value,
+        helpWidgets: [Text(tr('preferRootWhenAvailableHelp'))],
+      ),
+      CardTile(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        child: SizedBox(
+          width: double.infinity,
+          child: FilledButton.tonal(
+            onPressed: () =>
+                runServerSync(context, reportWhenNothingToDo: true),
+            child: Text(tr('serverSyncNow')),
+          ),
+        ),
+      ),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      spacing: AppSpacings.connectedGap,
+      children: shapeCardTiles(children),
     );
   }
 

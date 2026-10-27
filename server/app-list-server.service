@@ -1,0 +1,18 @@
+[Unit]
+Description=Personal Obtainium app list server
+After=network.target
+
+[Service]
+User=applist
+WorkingDirectory=/opt/app-list-server
+EnvironmentFile=/opt/app-list-server/.env
+ExecStart=/usr/bin/node /opt/app-list-server/server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/app-list-server/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
