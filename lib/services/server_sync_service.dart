@@ -6,6 +6,52 @@ import 'package:obtainium/services/http_service.dart';
 
 const String serverSyncUrlFromBuild = String.fromEnvironment('SERVER_SYNC_URL');
 
+/// Secret built into the APK (from the SERVER_SYNC_APP_KEY build secret) and sent
+/// with every list request, so the server only answers this app.
+const String serverSyncAppKeyFromBuild = String.fromEnvironment(
+  'SERVER_SYNC_APP_KEY',
+);
+
+/// Header that carries [serverSyncAppKeyFromBuild]. It is dropped if the server
+/// redirects to another host.
+const String serverSyncAppKeyHeader = 'X-App-Key';
+
+final RegExp _shortServerSyncRef = RegExp(
+  r'^([A-Za-z0-9_-]{1,32})(?:/([A-Za-z0-9]{1,4}))?$',
+);
+
+/// Turns what the user typed into the URL to fetch.
+///
+/// A full http(s) URL is used as is. On a build with a SERVER_SYNC_URL, a short
+/// form saves typing on a car screen: `2` means list 2 with the built-in code,
+/// and `2/ab12` means list 2 with code ab12. Both keep the built-in host.
+/// Returns null when the input is neither.
+Uri? resolveServerSyncUrl(
+  String input, {
+  String base = serverSyncUrlFromBuild,
+}) {
+  final v = input.trim();
+  final uri = Uri.tryParse(v);
+  if (uri != null &&
+      (uri.scheme == 'http' || uri.scheme == 'https') &&
+      uri.host.isNotEmpty) {
+    return uri;
+  }
+  final m = _shortServerSyncRef.firstMatch(v);
+  final baseUri = Uri.tryParse(base.trim());
+  if (m == null ||
+      baseUri == null ||
+      !(baseUri.scheme == 'http' || baseUri.scheme == 'https') ||
+      baseUri.host.isEmpty) {
+    return null;
+  }
+  final code = m.group(2) ?? baseUri.queryParameters['key'];
+  return baseUri.replace(
+    path: '/apps/${m.group(1)!.toLowerCase()}',
+    queryParameters: code == null || code.isEmpty ? null : {'key': code},
+  );
+}
+
 const Map<String, dynamic> serverSyncDefaultAppSettings = {
   'autoApkFilterByArch': true,
 };
@@ -86,15 +132,20 @@ Future<List<ServerAppEntry>> fetchServerAppList(
   String url, {
   HttpService? httpService,
   Duration timeout = const Duration(seconds: 30),
+  String appKey = serverSyncAppKeyFromBuild,
+  String base = serverSyncUrlFromBuild,
 }) async {
-  final uri = Uri.tryParse(url.trim());
-  if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+  final uri = resolveServerSyncUrl(url, base: base);
+  if (uri == null) {
     throw ObtainiumError('${tr('invalidServerSyncUrl')}: $url');
   }
   final res = await (httpService ?? HttpService())
       .request(
         'GET',
-        {'Accept': 'application/json, text/plain'},
+        {
+          'Accept': 'application/json, text/plain',
+          if (appKey.isNotEmpty) serverSyncAppKeyHeader: appKey,
+        },
         {'url': uri.toString()},
       )
       .timeout(timeout);

@@ -76,6 +76,7 @@
 const $ = (id) => document.getElementById(id);
 let lists = [];
 let listKey = null;
+let appKeyRequired = false;
 let currentId = null;
 const releaseCache = {};
 
@@ -94,6 +95,7 @@ async function api(method, path, body) {
   if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
   lists = data.lists;
   listKey = data.listKey;
+  appKeyRequired = !!data.appKeyRequired;
   render();
   return data;
 }
@@ -151,6 +153,9 @@ function render() {
       button('Rename', 'Rename this list', false, renameList, 'small'),
       button('Delete list', 'Delete this list', false, deleteList, 'small danger')),
     el('div', { className: 'feed' }, 'Server sync URL for these devices:', el('code', { textContent: feedUrl }), copy),
+    el('div', { className: 'feed' }, 'Short form to type in the app:', el('code', { textContent: cur.id + (listKey ? '/' + listKey : '') }),
+      cur.id === (lists[0] && lists[0].id) ? ' (or leave the built-in URL if it points here)' : ''),
+    appKeyRequired ? el('div', { className: 'feed', textContent: 'Only the Personal Obtainium app can open these URLs; a browser gets 404.' }) : null,
     listKey ? null : el('div', { className: 'feed', textContent: 'Warning: LIST_KEY is not set, so anyone who guesses this URL can read the list.' }),
     addForm()));
 

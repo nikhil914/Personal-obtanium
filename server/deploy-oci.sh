@@ -9,7 +9,10 @@
 #   state.env               E2=<instance OCID>, E2_IP=<public IP>, SL=<security list OCID>
 #                           (A1= and PUBLIC_IP= for the a1 target)
 #   dashboard_password.txt  dashboard password (or pass DASHBOARD_PASSWORD)
-#   list_key.txt            secret key for list URLs (or pass LIST_KEY); created if missing
+#   list_key.txt            4-character code for list URLs, typed on devices (or pass LIST_KEY)
+#   app_key.txt             long secret built into the APK (or pass APP_KEY); must match the
+#                           SERVER_SYNC_APP_KEY GitHub secret
+#   Both key files are created if missing.
 #
 # Works over the OCI API like the VPN project (no SSH):
 # 1. Security list: allows TCP 80 (certificate checks and redirect) and $HTTPS_PORT (default
@@ -42,15 +45,21 @@ DOMAIN=${DOMAIN:-${IP//./-}.sslip.io}
 
 DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-$(cat "$SECRETS/dashboard_password.txt" 2>/dev/null | tr -d '\r\n')}
 [ -n "$DASHBOARD_PASSWORD" ] || { echo "set DASHBOARD_PASSWORD or create $SECRETS/dashboard_password.txt"; exit 2; }
-if [ -z "${LIST_KEY:-}" ]; then
-  LIST_KEY=$(cat "$SECRETS/list_key.txt" 2>/dev/null | tr -d '\r\n')
-  if [ -z "$LIST_KEY" ]; then
-    LIST_KEY=$(openssl rand -hex 16)
-    (umask 077; echo "$LIST_KEY" > "$SECRETS/list_key.txt")
-    echo "new list key saved to $SECRETS/list_key.txt"
+# Reads a key from env or file, creating the file with gen's output if both are empty.
+key() { # name file gen-command
+  local v=${!1:-}
+  [ -n "$v" ] || v=$(cat "$SECRETS/$2" 2>/dev/null | tr -d '\r\n')
+  if [ -z "$v" ]; then
+    v=$(eval "$3")
+    (umask 077; echo "$v" > "$SECRETS/$2")
+    echo "new $1 saved to $SECRETS/$2" >&2
   fi
-fi
-[[ "$LIST_KEY" =~ ^[A-Za-z0-9_-]{16,}$ ]] || { echo "LIST_KEY must be 16+ letters, digits, - or _"; exit 2; }
+  echo "$v"
+}
+LIST_KEY=$(key LIST_KEY list_key.txt "openssl rand -base64 48 | tr -dc 'a-z0-9' | head -c 4")
+APP_KEY=$(key APP_KEY app_key.txt "openssl rand -hex 24")
+[[ "$LIST_KEY" =~ ^[A-Za-z0-9]{4}$ ]] || { echo "LIST_KEY must be exactly 4 letters or digits (delete $SECRETS/list_key.txt to get a new one)"; exit 2; }
+[[ "$APP_KEY" =~ ^[A-Za-z0-9_-]{24,}$ ]] || { echo "APP_KEY must be 24+ letters, digits, - or _"; exit 2; }
 
 # 1. Security list.
 : "${SL:?SL missing in state.env}"
@@ -73,8 +82,8 @@ fi
 B=$(mktemp -d)
 mkdir -p "$B/app/public"
 cp "$HERE/server.js" "$HERE/apps.seed.json" "$B/app/"; cp "$HERE/public/"* "$B/app/public/"
-printf 'PORT=%s\nHOST=127.0.0.1\nDASHBOARD_USER=%s\nDASHBOARD_PASSWORD=%s\nLIST_KEY=%s\n' \
-  "$APP_PORT" "${DASHBOARD_USER:-admin}" "$DASHBOARD_PASSWORD" "$LIST_KEY" > "$B/app/.env"
+printf 'PORT=%s\nHOST=127.0.0.1\nDASHBOARD_USER=%s\nDASHBOARD_PASSWORD=%s\nLIST_KEY=%s\nAPP_KEY=%s\n' \
+  "$APP_PORT" "${DASHBOARD_USER:-admin}" "$DASHBOARD_PASSWORD" "$LIST_KEY" "$APP_KEY" > "$B/app/.env"
 cat > "$B/app/Caddyfile" <<EOF
 {
 	http_port 80
@@ -187,5 +196,6 @@ for i in $(seq 1 180); do
 done
 oci instance-agent command-execution get --command-id "$RC" --instance-id "$INST" --query 'data.content.text' --raw-output 2>/dev/null
 echo "[run command: $st]"; [ "$st" = SUCCEEDED ] || exit 1
-echo "List URL:  https://$DOMAIN:$HTTPS_PORT/apps/1?key=<list key from $SECRETS/list_key.txt>"
+echo "List URL:  https://$DOMAIN:$HTTPS_PORT/apps/1?key=$LIST_KEY  (set as the SERVER_SYNC_URL repo variable)"
+echo "App key:   $SECRETS/app_key.txt  (set as the SERVER_SYNC_APP_KEY repo secret, then build a new APK)"
 echo "Dashboard: https://$DOMAIN:$HTTPS_PORT/dashboard"

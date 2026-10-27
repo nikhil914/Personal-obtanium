@@ -73,11 +73,13 @@ jobs:
         id: build
         env:
           SERVER_SYNC_URL: ${{ vars.SERVER_SYNC_URL }}
+          SERVER_SYNC_APP_KEY: ${{ secrets.SERVER_SYNC_APP_KEY }}
         run: |
           VERSION=$(grep -oP "^version: [^\+]+" pubspec.yaml | tail -c +10)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          flutter build apk --release --flavor normal --dart-define=SERVER_SYNC_URL="$SERVER_SYNC_URL"
-          flutter build apk --release --flavor normal --split-per-abi --dart-define=SERVER_SYNC_URL="$SERVER_SYNC_URL"
+          DEFINES=(--dart-define=SERVER_SYNC_URL="$SERVER_SYNC_URL" --dart-define=SERVER_SYNC_APP_KEY="$SERVER_SYNC_APP_KEY")
+          flutter build apk --release --flavor normal "${DEFINES[@]}"
+          flutter build apk --release --flavor normal --split-per-abi "${DEFINES[@]}"
           mkdir -p dist
           for f in build/app/outputs/flutter-apk/app-*-normal-release.apk build/app/outputs/flutter-apk/app-normal-release.apk; do
             [ -f "$f" ] || continue

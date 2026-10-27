@@ -8,8 +8,10 @@
 //            GET /apps/<id>.txt    -> one link per line
 //            GET /apps.json        -> the first list (for older links)
 //            GET /health           -> "ok" (no key needed)
-//            When LIST_KEY is set, every list URL needs ?key=LIST_KEY; without it the server
-//            answers 404, as if the list did not exist.
+//            When LIST_KEY is set, every list URL needs ?key=LIST_KEY (a short code that is
+//            easy to type on a car screen). When APP_KEY is set, the request must also carry
+//            the X-App-Key header that is built into the APK. Otherwise the server answers
+//            404, as if the list did not exist. Too many wrong tries block that IP for an hour.
 // Protected: GET /dashboard        -> web page to manage lists and links
 //            /api/lists...         -> JSON API behind the dashboard
 //
@@ -34,6 +36,8 @@ const DASHBOARD_USER = process.env.DASHBOARD_USER || 'admin';
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
 const DASHBOARD_HTML = path.join(__dirname, 'public', 'dashboard.html');
 const LIST_KEY = process.env.LIST_KEY || '';
+const APP_KEY = process.env.APP_KEY || '';
+const KEY_FAILS = parseInt(process.env.KEY_FAILS || '20', 10);
 const MAX_BODY = 64 * 1024;
 // Per client IP: requests per minute, and wrong dashboard logins per 15 minutes.
 const RATE_PER_MIN = parseInt(process.env.RATE_PER_MIN || '60', 10);
@@ -208,6 +212,7 @@ function readJson(req) {
 
 const hits = new Map(); // ip -> { n, reset }
 const fails = new Map(); // ip -> { n, reset }
+const keyFails = new Map(); // ip -> { n, reset }
 
 function clientIp(req) {
   const peer = req.socket.remoteAddress || '';
@@ -230,20 +235,22 @@ function count(map, ip, max, windowMs) {
   return e.n <= max;
 }
 
-function lockedOut(ip) {
-  const e = fails.get(ip);
-  return !!e && e.reset > Date.now() && e.n >= LOGIN_FAILS;
+function lockedOut(ip, map = fails, max = LOGIN_FAILS) {
+  const e = map.get(ip);
+  return !!e && e.reset > Date.now() && e.n >= max;
 }
 
 setInterval(() => {
   const now = Date.now();
-  for (const map of [hits, fails]) for (const [ip, e] of map) if (e.reset <= now) map.delete(ip);
+  for (const map of [hits, fails, keyFails]) for (const [ip, e] of map) if (e.reset <= now) map.delete(ip);
 }, 60 * 1000).unref();
 
-function hasListKey(url) {
-  if (!LIST_KEY) return true;
+function hasKeys(req, url) {
   const k = url.searchParams.get('key') || '';
-  return k !== '' && safeEqual(k, LIST_KEY);
+  const a = req.headers['x-app-key'] || '';
+  const listOk = !LIST_KEY || (k !== '' && safeEqual(k, LIST_KEY));
+  const appOk = !APP_KEY || (typeof a === 'string' && a !== '' && safeEqual(a, APP_KEY));
+  return listOk && appOk;
 }
 
 // ---------- routes ----------
@@ -256,7 +263,7 @@ function sendList(res, list, asText) {
 }
 
 function ok(res, status = 200) {
-  send(res, status, { lists, listKey: LIST_KEY || null });
+  send(res, status, { lists, listKey: LIST_KEY || null, appKeyRequired: !!APP_KEY });
 }
 
 async function handleApi(req, res, p) {
@@ -359,8 +366,15 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET') {
       if (p === '/health') return send(res, 200, 'ok', 'text/plain');
     }
-    if (req.method === 'GET' && p !== '/' && p !== '/dashboard' && !p.startsWith('/api/') && !hasListKey(url)) {
+    if (req.method === 'GET' && (p === '/favicon.ico' || p === '/robots.txt')) {
       return send(res, 404, { error: 'Not found' });
+    }
+    if (req.method === 'GET' && p !== '/' && p !== '/dashboard' && !p.startsWith('/api/')) {
+      if (lockedOut(ip, keyFails, KEY_FAILS)) return send(res, 404, { error: 'Not found' });
+      if (!hasKeys(req, url)) {
+        count(keyFails, ip, KEY_FAILS, 60 * 60 * 1000);
+        return send(res, 404, { error: 'Not found' });
+      }
     }
     if (req.method === 'GET') {
       if (p === '/') {
@@ -412,6 +426,7 @@ server.maxRequestsPerSocket = 100;
 
 server.listen(PORT, HOST, () => {
   console.log(`App list server on http://${HOST}:${PORT}  (lists: /apps/<id>, dashboard: /dashboard)`);
+  if (!APP_KEY) console.warn('APP_KEY is not set: list requests are not tied to the app.');
   if (!LIST_KEY) console.warn('LIST_KEY is not set: anyone who knows a list id can read that list.');
   console.log(`Data file: ${DATA_FILE}  (${lists.map((l) => `${l.id}: ${l.apps.length} links`).join(', ') || 'no lists'})`);
 });

@@ -255,7 +255,7 @@
     "serverSyncOnStart": "Sync with the server when the app opens",
     "serverSyncSummary": "Server lists {} apps: {} added, {} installed or updated",
     "serverSyncUrl": "App list URL",
-    "serverSyncUrlHelp": "The app fetches this URL with GET. It should return a JSON array of repository links, a JSON object with an \"apps\" array, or plain text with one link per line. Listed apps are added, installed if missing and kept up to date.",
+    "serverSyncUrlHelp": "The app fetches this URL with GET. It should return a JSON array of repository links, a JSON object with an \"apps\" array, or plain text with one link per line. Listed apps are added, installed if missing and kept up to date. On builds with a built-in server, a short form also works: 2 means list 2, and 2/ab12 means list 2 with code ab12.",
     "serverSyncUrlNotSet": "No server URL set",
     "skipBulkUpdateConfirmation": "Skip update/install confirmation dialog",
     "highlightTouchTargets": "Highlight less obvious touch targets",

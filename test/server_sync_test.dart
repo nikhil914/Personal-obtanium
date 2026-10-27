@@ -113,11 +113,66 @@ void main() {
       );
     });
 
+    test('sends the app key header when one is built in', () async {
+      late http.Request seen;
+      final service = HttpService(
+        clientFactory: (_) async => MockClient((request) async {
+          seen = request;
+          return http.Response('[]', 200);
+        }),
+      );
+      await fetchServerAppList(
+        '2/ab12',
+        httpService: service,
+        appKey: 'secret',
+        base: 'https://lists.example.com:8443/apps/1?key=zz99',
+      );
+      expect(
+        seen.url,
+        Uri.parse('https://lists.example.com:8443/apps/2?key=ab12'),
+      );
+      expect(seen.headers[serverSyncAppKeyHeader], 'secret');
+    });
+
     test('rejects a URL without scheme or host', () {
       expect(
         fetchServerAppList('example.com/apps'),
         throwsA(isA<ObtainiumError>()),
       );
+    });
+  });
+
+  group('resolveServerSyncUrl', () {
+    const base = 'https://lists.example.com:8443/apps/1?key=zz99';
+
+    test('keeps a full URL', () {
+      expect(
+        resolveServerSyncUrl('http://1.2.3.4:8080/apps/3?key=x', base: base),
+        Uri.parse('http://1.2.3.4:8080/apps/3?key=x'),
+      );
+    });
+
+    test('expands a list id with the built-in code', () {
+      expect(
+        resolveServerSyncUrl(' 2 ', base: base),
+        Uri.parse('https://lists.example.com:8443/apps/2?key=zz99'),
+      );
+    });
+
+    test('expands a list id and code', () {
+      expect(
+        resolveServerSyncUrl('Car/AB12', base: base),
+        Uri.parse('https://lists.example.com:8443/apps/car?key=AB12'),
+      );
+    });
+
+    test('needs a built-in URL for the short form', () {
+      expect(resolveServerSyncUrl('2/ab12', base: ''), isNull);
+    });
+
+    test('rejects codes longer than 4 characters and other text', () {
+      expect(resolveServerSyncUrl('2/abcde', base: base), isNull);
+      expect(resolveServerSyncUrl('example.com/apps', base: base), isNull);
     });
   });
 

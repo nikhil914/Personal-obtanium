@@ -22,6 +22,7 @@ import 'package:obtainium/providers/apps_provider.dart';
 import 'package:obtainium/providers/external_install_bridge.dart';
 import 'package:obtainium/providers/settings_provider.dart';
 import 'package:obtainium/providers/source_provider.dart';
+import 'package:obtainium/services/server_sync_service.dart';
 import 'package:obtainium/theme.dart';
 import 'package:obtainium/utils/update_health.dart';
 import 'package:obtainium/utils/locale_utils.dart';
@@ -495,15 +496,14 @@ class _SettingsPageState extends State<SettingsPage> {
               'serverSyncUrl',
               label: tr('serverSyncUrl'),
               required: false,
-              hint: 'http://example.com/apps.json',
+              hint: serverSyncUrlFromBuild.isEmpty
+                  ? 'https://example.com/apps/1?key=ab12'
+                  : '2  or  2/ab12',
               additionalValidators: [
                 (value) {
                   final v = value?.trim() ?? '';
                   if (v.isEmpty) return null;
-                  final uri = Uri.tryParse(v);
-                  if (uri == null ||
-                      !(uri.scheme == 'http' || uri.scheme == 'https') ||
-                      uri.host.isEmpty) {
+                  if (resolveServerSyncUrl(v) == null) {
                     return tr('invalidServerSyncUrl');
                   }
                   return null;

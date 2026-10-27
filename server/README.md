@@ -2,7 +2,7 @@
 
 A small server that tells Personal Obtainium which apps to install. Each device category
 (car units, phones, ...) has its own list with a short id such as `1`, `2` or `car`. A device
-sends `GET /apps/<id>?key=<list key>` each time the app opens and adds or removes apps to match.
+sends `GET /apps/<id>?key=<code>` with its built-in app key each time the app opens and adds or removes apps to match.
 
 | Path | Who | What |
 | --- | --- | --- |
@@ -16,11 +16,14 @@ sends `GET /apps/<id>?key=<list key>` each time the app opens and adds or remove
 
 ## Protection
 
-- **List key.** When `LIST_KEY` is set, a list URL without the right `?key=` gets a 404, the
-  same as a list that does not exist. The dashboard shows each list's full URL with the key.
-  To change the key, change `list_key.txt` (or `LIST_KEY`), redeploy and update the devices.
-  Don't bake the key into a public APK: anyone can unpack a public release and read it. Set it
-  on each device in the app's Settings instead, or keep releases private.
+- **App key.** When `APP_KEY` is set, list requests must carry it in the `X-App-Key` header.
+  The APK is built with it (GitHub secret `SERVER_SYNC_APP_KEY`), so the app gets the lists and
+  a browser or script gets 404. Someone who unpacks a public APK can still find it, so it
+  keeps out scanners and casual visitors, not a determined attacker.
+- **List code.** When `LIST_KEY` is set, a list URL also needs `?key=<code>`, a 4-character
+  code that is easy to type on a car screen. Wrong codes count against the IP: `KEY_FAILS`
+  misses (default 20) block that IP's list requests for an hour. To change either key, edit
+  `list_key.txt` or `app_key.txt`, redeploy, and (for the app key) rebuild the APK.
 - **Rate limits.** Each client IP gets `RATE_PER_MIN` requests a minute (default 60), then
   429. `LOGIN_FAILS` wrong dashboard passwords (default 10) lock that IP out for 15 minutes.
   Slow or oversized requests are cut off.
@@ -43,22 +46,23 @@ plain links. To add settings, edit `data/lists.json` by hand and restart.
 ## Pointing devices at a list
 
 The APK has one built-in URL, from the `SERVER_SYNC_URL` repository variable. Set it to the
-list most devices use, or leave it empty so the key is not in the APK (see Protection). On
-each device, open the app's **Settings → Server sync** and paste that device's list URL, for
-example `https://140-245-6-236.sslip.io:8443/apps/2?key=...`. The dashboard shows each list's
-URL with a copy button.
+list most devices use, for example `https://140-245-6-236.sslip.io:8443/apps/1?key=ab12`, so
+those devices need no typing. On a device in another category, open **Settings → Server
+sync** and type the short form: `2` for list 2 with the built-in code, or `2/ab12` for list 2
+with code ab12. A full URL also works. The dashboard shows both forms for each list.
 
 ## Run locally
 
 ```sh
 cd server
-DASHBOARD_PASSWORD=secret LIST_KEY=dev-key-0123456789 node server.js
-# list:      http://localhost:8080/apps/1?key=dev-key-0123456789
+DASHBOARD_PASSWORD=secret LIST_KEY=ab12 APP_KEY=dev-app-key node server.js
+# list:      curl -H "X-App-Key: dev-app-key" "http://localhost:8080/apps/1?key=ab12"
 # dashboard: http://localhost:8080/dashboard  (user admin, password secret)
 ```
 
 Environment variables: `PORT` (8080), `HOST` (0.0.0.0), `DASHBOARD_USER` (admin),
-`DASHBOARD_PASSWORD` (required, the server will not start without it), `LIST_KEY`,
+`DASHBOARD_PASSWORD` (required, the server will not start without it), `LIST_KEY`, `APP_KEY`,
+`KEY_FAILS` (20),
 `RATE_PER_MIN` (60), `LOGIN_FAILS` (10), `DATA_FILE`.
 
 ## Deploy to the Oracle Cloud E2 instance
@@ -86,8 +90,9 @@ Where the values come from in the Oracle Cloud console (region Mumbai):
 - `E2_IP`: the Public IP address on the same page.
 - `SL`: Networking → Virtual cloud networks → `vpn-vcn` → Security Lists → `vpn-sl` → OCID → Copy.
 
-Also put the dashboard password in `vpn-secrets/dashboard_password.txt`. The list key goes in
-`vpn-secrets/list_key.txt`; the first deploy creates it if it is missing.
+Also put the dashboard password in `vpn-secrets/dashboard_password.txt`. The list code and app
+key go in `vpn-secrets/list_key.txt` and `vpn-secrets/app_key.txt`; the deploy creates them if
+missing. Put the app key in the `SERVER_SYNC_APP_KEY` GitHub secret and build a new APK.
 
 ```sh
 cd Personal-obtanium/server
@@ -113,11 +118,11 @@ sudo apt install -y nodejs           # Amazon Linux: sudo dnf install -y nodejs
 sudo mkdir -p /opt/app-list-server/data && sudo cp -r server/. /opt/app-list-server/
 sudo useradd --system --home /opt/app-list-server --shell /usr/sbin/nologin applist
 cd /opt/app-list-server
-sudo cp .env.example .env && sudo nano .env    # set DASHBOARD_PASSWORD and LIST_KEY
+sudo cp .env.example .env && sudo nano .env    # set DASHBOARD_PASSWORD, LIST_KEY and APP_KEY
 sudo chown -R applist:applist /opt/app-list-server && sudo chmod 600 .env
 sudo cp app-list-server.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now app-list-server
-curl "http://localhost:8080/apps/1?key=YOUR_LIST_KEY"
+curl -H "X-App-Key: YOUR_APP_KEY" "http://localhost:8080/apps/1?key=YOUR_CODE"
 ```
 
 Then allow inbound TCP 8080 in the cloud firewall (security group or security list).
