@@ -3,13 +3,19 @@
 //
 // Each device category has its own list, named by a short id such as 1, 2 or car.
 //
-// Public:    GET /apps/<id>        -> {"apps": [...]} read by the app on open
+// Lists:     GET /apps/<id>?key=K  -> {"apps": [...]} read by the app on open
 //            GET /<id>             -> same as /apps/<id>
 //            GET /apps/<id>.txt    -> one link per line
 //            GET /apps.json        -> the first list (for older links)
-//            GET /health           -> "ok"
+//            GET /health           -> "ok" (no key needed)
+//            When LIST_KEY is set, every list URL needs ?key=LIST_KEY; without it the server
+//            answers 404, as if the list did not exist.
 // Protected: GET /dashboard        -> web page to manage lists and links
 //            /api/lists...         -> JSON API behind the dashboard
+//
+// Requests are rate limited per client IP, and repeated wrong dashboard passwords lock that
+// IP out for a while. Behind a local reverse proxy (Caddy), the client IP is taken from
+// X-Forwarded-For.
 //
 // No dependencies. Needs Node 18 or newer.
 
@@ -27,7 +33,11 @@ const SEED_FILE = path.join(__dirname, 'apps.seed.json');
 const DASHBOARD_USER = process.env.DASHBOARD_USER || 'admin';
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
 const DASHBOARD_HTML = path.join(__dirname, 'public', 'dashboard.html');
+const LIST_KEY = process.env.LIST_KEY || '';
 const MAX_BODY = 64 * 1024;
+// Per client IP: requests per minute, and wrong dashboard logins per 15 minutes.
+const RATE_PER_MIN = parseInt(process.env.RATE_PER_MIN || '60', 10);
+const LOGIN_FAILS = parseInt(process.env.LOGIN_FAILS || '10', 10);
 const ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const RESERVED = new Set(['apps', 'api', 'dashboard', 'health']);
 
@@ -194,6 +204,48 @@ function readJson(req) {
   });
 }
 
+// ---------- abuse limits ----------
+
+const hits = new Map(); // ip -> { n, reset }
+const fails = new Map(); // ip -> { n, reset }
+
+function clientIp(req) {
+  const peer = req.socket.remoteAddress || '';
+  const local = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
+  const xff = req.headers['x-forwarded-for'];
+  if (local && typeof xff === 'string' && xff) return xff.split(',').pop().trim();
+  return peer;
+}
+
+// Counts one event for ip in map; returns false once more than max happened in the window.
+function count(map, ip, max, windowMs) {
+  const now = Date.now();
+  let e = map.get(ip);
+  if (!e || e.reset <= now) {
+    if (map.size > 50000) map.clear(); // a flood of distinct IPs must not exhaust memory
+    e = { n: 0, reset: now + windowMs };
+    map.set(ip, e);
+  }
+  e.n++;
+  return e.n <= max;
+}
+
+function lockedOut(ip) {
+  const e = fails.get(ip);
+  return !!e && e.reset > Date.now() && e.n >= LOGIN_FAILS;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const map of [hits, fails]) for (const [ip, e] of map) if (e.reset <= now) map.delete(ip);
+}, 60 * 1000).unref();
+
+function hasListKey(url) {
+  if (!LIST_KEY) return true;
+  const k = url.searchParams.get('key') || '';
+  return k !== '' && safeEqual(k, LIST_KEY);
+}
+
 // ---------- routes ----------
 
 function sendList(res, list, asText) {
@@ -204,7 +256,7 @@ function sendList(res, list, asText) {
 }
 
 function ok(res, status = 200) {
-  send(res, status, { lists });
+  send(res, status, { lists, listKey: LIST_KEY || null });
 }
 
 async function handleApi(req, res, p) {
@@ -294,11 +346,23 @@ async function handleApi(req, res, p) {
 }
 
 const server = http.createServer(async (req, res) => {
+  const ip = clientIp(req);
+  if (!count(hits, ip, RATE_PER_MIN, 60 * 1000)) {
+    return send(res, 429, { error: 'Too many requests' }, 'application/json; charset=utf-8', {
+      'Retry-After': '60',
+      Connection: 'close',
+    });
+  }
   const url = new URL(req.url, 'http://localhost');
   const p = url.pathname.replace(/\/+$/, '') || '/';
   try {
     if (req.method === 'GET') {
       if (p === '/health') return send(res, 200, 'ok', 'text/plain');
+    }
+    if (req.method === 'GET' && p !== '/' && p !== '/dashboard' && !p.startsWith('/api/') && !hasListKey(url)) {
+      return send(res, 404, { error: 'Not found' });
+    }
+    if (req.method === 'GET') {
       if (p === '/') {
         res.writeHead(302, { Location: '/dashboard' });
         return res.end();
@@ -315,7 +379,15 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (p === '/dashboard' || p === '/api/lists' || p.startsWith('/api/')) {
-      if (!authorized(req)) return challenge(res);
+      if (lockedOut(ip)) {
+        return send(res, 429, { error: 'Too many wrong passwords. Try again later.' }, 'application/json; charset=utf-8', {
+          'Retry-After': '900',
+        });
+      }
+      if (!authorized(req)) {
+        if (req.headers.authorization) count(fails, ip, LOGIN_FAILS, 15 * 60 * 1000);
+        return challenge(res);
+      }
       if (p === '/dashboard' && req.method === 'GET') {
         return send(res, 200, fs.readFileSync(DASHBOARD_HTML), 'text/html; charset=utf-8', {
           'X-Frame-Options': 'DENY',
@@ -331,7 +403,15 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// Drop slow or oversized requests quickly so idle connections cannot pile up.
+server.headersTimeout = 10 * 1000;
+server.requestTimeout = 15 * 1000;
+server.keepAliveTimeout = 5 * 1000;
+server.maxHeadersCount = 50;
+server.maxRequestsPerSocket = 100;
+
 server.listen(PORT, HOST, () => {
   console.log(`App list server on http://${HOST}:${PORT}  (lists: /apps/<id>, dashboard: /dashboard)`);
+  if (!LIST_KEY) console.warn('LIST_KEY is not set: anyone who knows a list id can read that list.');
   console.log(`Data file: ${DATA_FILE}  (${lists.map((l) => `${l.id}: ${l.apps.length} links`).join(', ') || 'no lists'})`);
 });
