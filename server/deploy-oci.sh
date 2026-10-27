@@ -3,8 +3,12 @@
 #
 # Usage: DASHBOARD_PASSWORD='long-secret' ./deploy-oci.sh [e2|a1]
 #
-# Reuses the VPN project's OCI setup (no SSH): env.sh, runcmd.sh and ../vpn-secrets/state.env.
-# Set VPN_DIR if the Vpn-server-v1 checkout is not next to this repository.
+# Needs the OCI CLI, jq and openssl, and a secrets folder (VPN_SECRETS, default: a
+# vpn-secrets/ folder next to this repository) holding:
+#   oci_config  the OCI CLI config (user, fingerprint, tenancy, region, key_file)
+#   state.env   E2=<instance OCID>, E2_IP=<public IP>, SL=<security list OCID>
+#               (A1= and PUBLIC_IP= for the a1 target)
+# Works over the OCI API like the VPN project (no SSH):
 # 1. Opens TCP $PORT (default 8080) in the VCN security list, keeping every existing rule.
 # 2. Ships this folder via a 20-minute Object Storage pre-authenticated URL.
 # 3. Installs Node, the files and a systemd service via OCI Run Command, and opens $PORT in iptables.
@@ -12,20 +16,23 @@
 # DASHBOARD_PASSWORD is required on the first deploy; later deploys keep the existing one unless set.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-VPN_DIR=${VPN_DIR:-$(cd "$HERE/../.." && pwd)/Vpn-server-v1}
-[ -f "$VPN_DIR/env.sh" ] || VPN_DIR=$(cd "$HERE/../.." && pwd)/vpn-server-v1
-[ -f "$VPN_DIR/env.sh" ] || { echo "VPN project not found; set VPN_DIR"; exit 2; }
-SECRETS=$(dirname "$VPN_DIR")/vpn-secrets
-. "$VPN_DIR/env.sh"; . "$SECRETS/state.env"
+SECRETS=${VPN_SECRETS:-$(cd "$HERE/../.." && pwd)/vpn-secrets}
+for f in oci_config state.env; do [ -f "$SECRETS/$f" ] || { echo "missing $SECRETS/$f (set VPN_SECRETS)"; exit 2; }; done
+for c in oci jq openssl; do command -v $c >/dev/null || { echo "install $c first"; exit 2; }; done
+export OCI_CLI_CONFIG_FILE=$SECRETS/oci_config OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True SUPPRESS_LABEL_WARNING=True
+T=$(grep '^tenancy' "$OCI_CLI_CONFIG_FILE" | head -1 | cut -d= -f2 | tr -d ' ')
+REGION=$(grep '^region' "$OCI_CLI_CONFIG_FILE" | head -1 | cut -d= -f2 | tr -d ' ')
+. "$SECRETS/state.env"
 PORT=${PORT:-8080}
 WHO=${1:-e2}
 case $WHO in
-  e2) INST=$E2; IP=$E2_IP;;
-  a1) INST=$A1; IP=$PUBLIC_IP;;
+  e2) INST=${E2:?E2 missing in state.env}; IP=${E2_IP:?E2_IP missing in state.env};;
+  a1) INST=${A1:?A1 missing in state.env}; IP=${PUBLIC_IP:?PUBLIC_IP missing in state.env};;
   *) echo "usage: $0 [e2|a1]"; exit 2;;
 esac
 
 # 1. Security list: append the rule only if it is missing.
+: "${SL:?SL missing in state.env}"
 RULES=$(oci network security-list get --security-list-id "$SL" --query 'data."ingress-security-rules"' 2>/dev/null) \
   || { echo "could not read security list"; exit 1; }
 if echo "$RULES" | jq -e --argjson p "$PORT" 'any(.[]; .protocol=="6" and .source=="0.0.0.0/0" and ."tcp-options"."destination-port-range".min==$p)' >/dev/null; then
@@ -53,7 +60,7 @@ OBJ="applist-$(openssl rand -hex 12).tgz"
 oci os object put -bn vpn-deploy --name $OBJ --file "$B/bundle.tgz" --force >/dev/null 2>&1 || { echo "upload failed"; rm -rf "$B"; exit 1; }
 EXP=$(date -u -d '+20 min' +%Y-%m-%dT%H:%M:%SZ)
 PAR=$(oci os preauth-request create -bn vpn-deploy --name $OBJ --access-type ObjectRead --object-name $OBJ --time-expires $EXP 2>/dev/null)
-URL="https://objectstorage.ap-mumbai-1.oraclecloud.com$(echo "$PAR" | jq -r '.data."access-uri"')"; PARID=$(echo "$PAR" | jq -r .data.id)
+URL="https://objectstorage.$REGION.oraclecloud.com$(echo "$PAR" | jq -r '.data."access-uri"')"; PARID=$(echo "$PAR" | jq -r .data.id)
 cleanup() { oci os preauth-request delete -bn vpn-deploy --par-id $PARID --force >/dev/null 2>&1; oci os object delete -bn vpn-deploy --name $OBJ --force >/dev/null 2>&1; rm -rf "$B"; }
 trap cleanup EXIT
 echo "bundle staged, installing on $WHO"
@@ -99,6 +106,15 @@ fi
 sudo systemctl daemon-reload; sudo systemctl enable app-list-server >/dev/null 2>&1; sudo systemctl restart app-list-server
 sleep 2; echo node=\$(node -v) service=\$(systemctl is-active app-list-server)
 curl -fsS http://127.0.0.1:$PORT/health && echo ' health ok'"
-TIMEOUT=600 WAIT=900 "$VPN_DIR/runcmd.sh" "$INST" "$CMD"
+tgt=$(jq -nc --arg i "$INST" '{instanceId:$i}')
+content=$(jq -nc --arg s "$CMD" '{source:{sourceType:"TEXT",text:$s},output:{outputType:"TEXT"}}')
+RC=$(oci instance-agent command create -c "$T" --target "$tgt" --content "$content" --timeout-in-seconds 600 \
+  --display-name "applist-$(date +%s)" --query data.id --raw-output) || { echo "run command failed to start"; exit 1; }
+for i in $(seq 1 180); do
+  st=$(oci instance-agent command-execution get --command-id "$RC" --instance-id "$INST" --query 'data."lifecycle-state"' --raw-output 2>/dev/null)
+  case $st in SUCCEEDED|FAILED|TIMED_OUT|CANCELED) break;; esac; sleep 5
+done
+oci instance-agent command-execution get --command-id "$RC" --instance-id "$INST" --query 'data.content.text' --raw-output 2>/dev/null
+echo "[run command: $st]"; [ "$st" = SUCCEEDED ] || exit 1
 echo "List:      http://$IP:$PORT/apps/1"
 echo "Dashboard: http://$IP:$PORT/dashboard"

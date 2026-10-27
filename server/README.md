@@ -45,15 +45,27 @@ Environment variables: `PORT` (8080), `HOST` (0.0.0.0), `DASHBOARD_USER` (admin)
 ## Deploy to the Oracle Cloud E2 instance
 
 `deploy-oci.sh` deploys to the E2.1.Micro instance from the VPN project (`Vpn-server-v1`),
-the same way that project deploys: over the OCI API with Run Command, no SSH. Run it on the
-computer that has the VPN project and its `vpn-secrets/` folder side by side with this repo:
+the same way that project deploys: over the OCI API with Run Command, no SSH. It needs the
+[OCI CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm) (`pip install oci-cli`),
+`jq` and `openssl`, and a `vpn-secrets/` folder next to this repo (or set `VPN_SECRETS=/path`):
 
 ```
 some-folder/
   Personal-obtanium/     (this repo)
-  Vpn-server-v1/
-  vpn-secrets/           (oci_config, state.env, ...)
+  vpn-secrets/
+    oci_config           OCI CLI config: user, fingerprint, tenancy, region, key_file
+    oci_api_key.pem      the API private key that key_file points to
+    state.env            E2=ocid1.instance...  E2_IP=1.2.3.4  SL=ocid1.securitylist...
 ```
+
+Where the values come from in the Oracle Cloud console (region Mumbai):
+
+- `oci_config`: profile icon → My profile → API keys → Add API key → Generate API key pair →
+  Download private key → Add. Copy the configuration preview it shows into `oci_config` and
+  set `key_file` to the downloaded `.pem`.
+- `E2`: Compute → Instances → the E2 instance (`vpn-e2`) → OCID → Copy.
+- `E2_IP`: the Public IP address on the same page.
+- `SL`: Networking → Virtual cloud networks → `vpn-vcn` → Security Lists → `vpn-sl` → OCID → Copy.
 
 ```sh
 cd Personal-obtanium/server
@@ -64,7 +76,6 @@ It opens TCP 8080 in the VCN security list (keeping every existing rule), instal
 locked-down systemd service (`app-list-server`, runs as user `applist`), opens 8080 in the
 instance's iptables, and prints the list and dashboard links. Run it again to ship code
 changes; the lists and the password are kept (set `DASHBOARD_PASSWORD` again to change it).
-Set `VPN_DIR=/path/to/Vpn-server-v1` if the folders are laid out differently.
 
 Note: the VPN project's `phase1-network.sh` rewrites the security list from scratch, so after
 running it, run `deploy-oci.sh` again to reopen port 8080.
