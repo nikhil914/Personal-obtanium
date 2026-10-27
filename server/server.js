@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 // App list server for Personal Obtainium.
 //
-// Public:    GET /apps.json        -> {"apps": [...]} read by the app on open
-//            GET /apps.txt         -> one link per line
+// Each device category has its own list, named by a short id such as 1, 2 or car.
+//
+// Public:    GET /apps/<id>        -> {"apps": [...]} read by the app on open
+//            GET /<id>             -> same as /apps/<id>
+//            GET /apps/<id>.txt    -> one link per line
+//            GET /apps.json        -> the first list (for older links)
 //            GET /health           -> "ok"
-// Protected: GET /dashboard        -> web page to add, remove and reorder links
-//            GET/POST/DELETE/PUT /api/apps
+// Protected: GET /dashboard        -> web page to manage lists and links
+//            /api/lists...         -> JSON API behind the dashboard
 //
 // No dependencies. Needs Node 18 or newer.
 
@@ -18,19 +22,21 @@ const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
-const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data', 'apps.json');
+const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data', 'lists.json');
 const SEED_FILE = path.join(__dirname, 'apps.seed.json');
 const DASHBOARD_USER = process.env.DASHBOARD_USER || 'admin';
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
 const DASHBOARD_HTML = path.join(__dirname, 'public', 'dashboard.html');
 const MAX_BODY = 64 * 1024;
+const ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+const RESERVED = new Set(['apps', 'api', 'dashboard', 'health']);
 
 if (!DASHBOARD_PASSWORD) {
   console.error('DASHBOARD_PASSWORD is not set. Refusing to start with an open dashboard.');
   process.exit(1);
 }
 
-// ---------- storage ----------
+// ---------- validation ----------
 
 function normalizeUrl(raw) {
   if (typeof raw !== 'string') return null;
@@ -70,35 +76,69 @@ function cleanEntry(item) {
   return entry;
 }
 
-function loadApps() {
-  const file = fs.existsSync(DATA_FILE) ? DATA_FILE : SEED_FILE;
-  const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const list = Array.isArray(parsed) ? parsed : parsed.apps || [];
+function cleanApps(list) {
   const seen = new Set();
-  const apps = [];
-  for (const item of list) {
+  const out = [];
+  for (const item of Array.isArray(list) ? list : []) {
     const e = cleanEntry(item);
     if (e && !seen.has(e.url.toLowerCase())) {
       seen.add(e.url.toLowerCase());
-      apps.push(e);
+      out.push(e);
     }
   }
-  return apps;
+  return out;
 }
 
-let apps = loadApps();
-if (!fs.existsSync(DATA_FILE)) saveApps();
+function cleanId(raw) {
+  const id = String(raw == null ? '' : raw).trim().toLowerCase();
+  return ID_RE.test(id) && !RESERVED.has(id) ? id : null;
+}
 
-function saveApps() {
+function cleanName(raw, fallback) {
+  const name = typeof raw === 'string' ? raw.trim().slice(0, 60) : '';
+  return name || fallback;
+}
+
+// ---------- storage ----------
+
+// lists: [{ id, name, apps: [{url, note?, settings?}] }], in display order.
+let lists = load();
+if (!fs.existsSync(DATA_FILE)) save();
+
+function load() {
+  if (fs.existsSync(DATA_FILE)) return fromJson(JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')));
+  // Data from the first version of this server: a single {"apps": [...]} file.
+  const old = path.join(path.dirname(DATA_FILE), 'apps.json');
+  if (fs.existsSync(old)) return fromJson(JSON.parse(fs.readFileSync(old, 'utf8')));
+  return fromJson(JSON.parse(fs.readFileSync(SEED_FILE, 'utf8')));
+}
+
+function fromJson(parsed) {
+  if (Array.isArray(parsed) || Array.isArray(parsed.apps)) {
+    return [{ id: '1', name: 'List 1', apps: cleanApps(Array.isArray(parsed) ? parsed : parsed.apps) }];
+  }
+  const out = [];
+  for (const l of parsed.lists || []) {
+    const id = cleanId(l.id);
+    if (id && !out.some((x) => x.id === id)) out.push({ id, name: cleanName(l.name, id), apps: cleanApps(l.apps) });
+  }
+  return out;
+}
+
+function save() {
   fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
   const tmp = DATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify({ apps }, null, 2) + '\n');
+  fs.writeFileSync(tmp, JSON.stringify({ lists }, null, 2) + '\n');
   fs.renameSync(tmp, DATA_FILE);
 }
 
+function findList(id) {
+  return lists.find((l) => l.id === String(id).toLowerCase());
+}
+
 // The app only needs url and settings; the note is for the dashboard.
-function publicList() {
-  return apps.map((a) => (a.settings ? { url: a.url, settings: a.settings } : a.url));
+function publicApps(list) {
+  return list.apps.map((a) => (a.settings ? { url: a.url, settings: a.settings } : a.url));
 }
 
 // ---------- http helpers ----------
@@ -156,54 +196,100 @@ function readJson(req) {
 
 // ---------- routes ----------
 
-async function handleApi(req, res, url) {
+function sendList(res, list, asText) {
+  if (asText) return send(res, 200, list.apps.map((a) => a.url).join('\n') + '\n', 'text/plain; charset=utf-8');
+  send(res, 200, { apps: publicApps(list) }, 'application/json; charset=utf-8', {
+    'Access-Control-Allow-Origin': '*',
+  });
+}
+
+function ok(res, status = 200) {
+  send(res, status, { lists });
+}
+
+async function handleApi(req, res, p) {
   // Requiring a JSON content type on writes blocks cross-site form posts.
   if (req.method !== 'GET' && !(req.headers['content-type'] || '').includes('application/json')) {
     return send(res, 415, { error: 'Use Content-Type: application/json' });
   }
+  const parts = p.split('/').slice(3).map(decodeURIComponent); // after /api/lists
+  const body = req.method === 'GET' ? {} : await readJson(req);
 
-  if (req.method === 'GET') return send(res, 200, { apps });
-
-  const body = await readJson(req);
-
-  if (req.method === 'POST') {
-    const entry = cleanEntry(body);
-    if (!entry) return send(res, 400, { error: 'That is not a valid http(s) link' });
-    if (apps.some((a) => a.url.toLowerCase() === entry.url.toLowerCase())) {
-      return send(res, 409, { error: 'That link is already in the list' });
-    }
-    apps.push(entry);
-    saveApps();
-    return send(res, 201, { apps });
-  }
-
-  if (req.method === 'DELETE') {
-    const target = normalizeUrl(body.url || url.searchParams.get('url') || '');
-    const before = apps.length;
-    apps = apps.filter((a) => a.url.toLowerCase() !== (target || '').toLowerCase());
-    if (apps.length === before) return send(res, 404, { error: 'Link not found' });
-    saveApps();
-    return send(res, 200, { apps });
-  }
-
-  if (req.method === 'PUT') {
-    // Replace the whole list (used for reordering and editing notes).
-    if (!Array.isArray(body.apps)) return send(res, 400, { error: 'Expected {"apps": [...]}' });
-    const seen = new Set();
-    const next = [];
-    for (const item of body.apps) {
-      const e = cleanEntry(item);
-      if (!e) return send(res, 400, { error: `Invalid link: ${JSON.stringify(item).slice(0, 100)}` });
-      if (!seen.has(e.url.toLowerCase())) {
-        seen.add(e.url.toLowerCase());
-        next.push(e);
+  // /api/lists
+  if (parts.length === 0) {
+    if (req.method === 'GET') return ok(res);
+    if (req.method === 'POST') {
+      const id = cleanId(body.id);
+      if (!id) {
+        return send(res, 400, {
+          error: 'Use a short id: lowercase letters, digits, - or _, up to 32 characters (for example 2 or car)',
+        });
       }
+      if (findList(id)) return send(res, 409, { error: `List ${id} already exists` });
+      lists.push({ id, name: cleanName(body.name, `List ${id}`), apps: [] });
+      save();
+      return ok(res, 201);
     }
-    apps = next;
-    saveApps();
-    return send(res, 200, { apps });
+    if (req.method === 'PUT') {
+      // Reorder lists: {"order": ["1", "car", ...]}
+      if (!Array.isArray(body.order)) return send(res, 400, { error: 'Expected {"order": [...]}' });
+      const rank = new Map(body.order.map((id, i) => [String(id), i]));
+      lists.sort((a, b) => (rank.get(a.id) ?? 1e9) - (rank.get(b.id) ?? 1e9));
+      save();
+      return ok(res);
+    }
+    return send(res, 405, { error: 'Method not allowed' });
   }
 
+  const list = findList(parts[0]);
+  if (!list) return send(res, 404, { error: 'List not found' });
+
+  // /api/lists/<id>
+  if (parts.length === 1) {
+    if (req.method === 'PATCH') {
+      list.name = cleanName(body.name, list.name);
+      save();
+      return ok(res);
+    }
+    if (req.method === 'DELETE') {
+      lists = lists.filter((l) => l !== list);
+      save();
+      return ok(res);
+    }
+    return send(res, 405, { error: 'Method not allowed' });
+  }
+
+  // /api/lists/<id>/apps
+  if (parts.length === 2 && parts[1] === 'apps') {
+    if (req.method === 'POST') {
+      const entry = cleanEntry(body);
+      if (!entry) return send(res, 400, { error: 'That is not a valid http(s) link' });
+      if (list.apps.some((a) => a.url.toLowerCase() === entry.url.toLowerCase())) {
+        return send(res, 409, { error: 'That link is already in this list' });
+      }
+      list.apps.push(entry);
+      save();
+      return ok(res, 201);
+    }
+    if (req.method === 'DELETE') {
+      const target = (normalizeUrl(body.url || '') || '').toLowerCase();
+      const before = list.apps.length;
+      list.apps = list.apps.filter((a) => a.url.toLowerCase() !== target);
+      if (list.apps.length === before) return send(res, 404, { error: 'Link not found' });
+      save();
+      return ok(res);
+    }
+    if (req.method === 'PUT') {
+      // Replace the whole list (used for reordering).
+      if (!Array.isArray(body.apps)) return send(res, 400, { error: 'Expected {"apps": [...]}' });
+      for (const item of body.apps) {
+        if (!cleanEntry(item)) return send(res, 400, { error: `Invalid link: ${JSON.stringify(item).slice(0, 100)}` });
+      }
+      list.apps = cleanApps(body.apps);
+      save();
+      return ok(res);
+    }
+  }
   send(res, 405, { error: 'Method not allowed' });
 }
 
@@ -211,20 +297,24 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const p = url.pathname.replace(/\/+$/, '') || '/';
   try {
-    if (req.method === 'GET' && (p === '/apps.json' || p === '/apps')) {
-      return send(res, 200, { apps: publicList() }, 'application/json; charset=utf-8', {
-        'Access-Control-Allow-Origin': '*',
-      });
+    if (req.method === 'GET') {
+      if (p === '/health') return send(res, 200, 'ok', 'text/plain');
+      if (p === '/') {
+        res.writeHead(302, { Location: '/dashboard' });
+        return res.end();
+      }
+      if (p === '/apps.json' || p === '/apps' || p === '/apps.txt') {
+        if (!lists.length) return send(res, 404, { error: 'No lists yet' });
+        return sendList(res, lists[0], p.endsWith('.txt'));
+      }
+      // /apps/<id>, /apps/<id>.json, /apps/<id>.txt, /<id>
+      const m = p.match(/^(?:\/apps)?\/([^/]+?)(\.json|\.txt)?$/);
+      if (m && !RESERVED.has(m[1].toLowerCase())) {
+        const list = findList(decodeURIComponent(m[1]));
+        if (list) return sendList(res, list, m[2] === '.txt');
+      }
     }
-    if (req.method === 'GET' && p === '/apps.txt') {
-      return send(res, 200, apps.map((a) => a.url).join('\n') + '\n', 'text/plain; charset=utf-8');
-    }
-    if (req.method === 'GET' && p === '/health') return send(res, 200, 'ok', 'text/plain');
-    if (req.method === 'GET' && p === '/') {
-      res.writeHead(302, { Location: '/dashboard' });
-      return res.end();
-    }
-    if (p === '/dashboard' || p.startsWith('/api/')) {
+    if (p === '/dashboard' || p === '/api/lists' || p.startsWith('/api/')) {
       if (!authorized(req)) return challenge(res);
       if (p === '/dashboard' && req.method === 'GET') {
         return send(res, 200, fs.readFileSync(DASHBOARD_HTML), 'text/html; charset=utf-8', {
@@ -233,7 +323,7 @@ const server = http.createServer(async (req, res) => {
             "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' https://api.github.com; img-src 'self' data:",
         });
       }
-      if (p === '/api/apps') return await handleApi(req, res, url);
+      if (p === '/api/lists' || p.startsWith('/api/lists/')) return await handleApi(req, res, p);
     }
     send(res, 404, { error: 'Not found' });
   } catch (err) {
@@ -242,6 +332,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`App list server on http://${HOST}:${PORT}  (list: /apps.json, dashboard: /dashboard)`);
-  console.log(`Data file: ${DATA_FILE}  (${apps.length} links)`);
+  console.log(`App list server on http://${HOST}:${PORT}  (lists: /apps/<id>, dashboard: /dashboard)`);
+  console.log(`Data file: ${DATA_FILE}  (${lists.map((l) => `${l.id}: ${l.apps.length} links`).join(', ') || 'no lists'})`);
 });
