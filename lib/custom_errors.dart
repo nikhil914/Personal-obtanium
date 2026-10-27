@@ -1,0 +1,372 @@
+import 'dart:io' show SocketException;
+import 'dart:ui' show Locale;
+
+import 'package:easy_localization/easy_localization.dart';
+import 'package:android_package_installer/android_package_installer.dart';
+import 'package:obtainium/core/logging/app_logger.dart';
+import 'package:obtainium/providers/source_provider.dart';
+
+class ObtainiumError {
+  final String code;
+  final String _message;
+  final StackTrace? stack;
+  final Map<String, dynamic> data;
+  final bool unexpected;
+
+  /// The app/source URL this error relates to, if known. Attached as context so
+  /// that logs and error messages can identify which app/URL an error came from
+  /// even when the error itself was thrown deep inside a source with no app
+  /// reference. Not part of the localized [message]; only surfaced via
+  /// [toString].
+  ///
+  /// This field is intentionally mutable so that URL context can be attached
+  /// after construction via [withUrlContext] or the `..url =` cascade pattern
+  /// without requiring every error subclass to carry a `copyWithUrl` factory.
+  /// TODO: Make immutable with a proper copy-with-url pattern across all subclasses.
+  String? url;
+
+  ObtainiumError(
+    this._message, {
+    this.code = 'UNKNOWN',
+    this.unexpected = false,
+    this.stack,
+    this.data = const {},
+    this.url,
+  });
+
+  ObtainiumError.withCode(
+    this.code, {
+    this._message = '',
+    this.unexpected = false,
+    this.stack,
+    this.data = const {},
+    this.url,
+  });
+
+  String get message =>
+      code == 'UNKNOWN' ||
+          code == 'UNEXPECTED' ||
+          code == 'CHECK_UPDATES_FAILED' ||
+          code == 'HTTP_ERROR'
+      ? _message
+      : localizeErrorCode(code, data);
+
+  /// Attaches [contextUrl] as the offending URL if none is set yet, so logs and
+  /// messages can identify the app/URL involved. Returns this for chaining.
+  ObtainiumError withUrlContext(String? contextUrl) {
+    if ((url == null || url!.isEmpty) &&
+        contextUrl != null &&
+        contextUrl.isNotEmpty) {
+      url = contextUrl;
+    }
+    return this;
+  }
+
+  @override
+  String toString() =>
+      url != null && url!.isNotEmpty ? '$message ($url)' : message;
+}
+
+Never rethrowOrWrapError(
+  Object error, {
+  String? sourceName,
+  StackTrace? stack,
+}) {
+  if (error is ObtainiumError) {
+    if (error.unexpected) {
+      final resolvedStack = error.stack ?? StackTrace.current;
+      AppLogger.error(
+        'Unexpected ObtainiumError: ${error.toString()}\n$resolvedStack',
+        message:
+            'Unexpected ObtainiumError: ${error.toString()}\n$resolvedStack',
+      );
+      throw error;
+    }
+    throw error;
+  }
+  final capturedStack = stack ?? StackTrace.current;
+  AppLogger.error(
+    'Wrapping unexpected error: $error\n$capturedStack',
+    message: 'Wrapping unexpected error: $error\n$capturedStack',
+  );
+  throw ObtainiumError(
+    sourceName != null ? '$sourceName: $error' : error.toString(),
+    code: 'UNEXPECTED',
+    unexpected: true,
+    stack: capturedStack,
+  );
+}
+
+/// A non-2xx HTTP response during a file download, carrying the status code so
+/// callers can decide whether the failure is retryable (e.g. 429/5xx).
+class HTTPStatusError extends ObtainiumError {
+  final int statusCode;
+  HTTPStatusError(this.statusCode, String message)
+    : super(message, code: 'HTTP_ERROR');
+}
+
+class RateLimitError extends ObtainiumError {
+  final int remainingMinutes;
+  RateLimitError(this.remainingMinutes)
+    : super.withCode(
+        'RATE_LIMIT',
+        data: {'remainingMinutes': remainingMinutes},
+      );
+}
+
+class InvalidURLError extends ObtainiumError {
+  InvalidURLError(String sourceName)
+    : super.withCode('INVALID_URL', data: {'sourceName': sourceName});
+}
+
+class CredsNeededError extends ObtainiumError {
+  CredsNeededError(String sourceName)
+    : super.withCode('CREDS_NEEDED', data: {'sourceName': sourceName});
+}
+
+class NoReleasesError extends ObtainiumError {
+  NoReleasesError({String? note})
+    : super.withCode('NO_RELEASES', data: {'note': note ?? ''});
+}
+
+class NoAPKError extends ObtainiumError {
+  NoAPKError() : super.withCode('NO_APK');
+}
+
+/// The latest release is younger than the configured minimum update age and
+/// the source cannot provide an older release (#3303).
+class MinUpdateAgeError extends ObtainiumError {
+  MinUpdateAgeError(DateTime releaseDate, int minAgeDays)
+    : super.withCode(
+        'MIN_UPDATE_AGE',
+        data: {
+          'releaseDate': releaseDate.toIso8601String(),
+          'minAgeDays': minAgeDays,
+        },
+      );
+}
+
+class NoVersionError extends ObtainiumError {
+  NoVersionError() : super.withCode('NO_VERSION');
+}
+
+class UnsupportedURLError extends ObtainiumError {
+  UnsupportedURLError() : super.withCode('UNSUPPORTED_URL');
+}
+
+class DowngradeError extends ObtainiumError {
+  DowngradeError(int currentVersionCode, int newVersionCode)
+    : super.withCode(
+        'DOWNGRADE',
+        data: {
+          'currentVersionCode': currentVersionCode,
+          'newVersionCode': newVersionCode,
+        },
+      );
+}
+
+class InstallError extends ObtainiumError {
+  InstallError(int code)
+    : super.withCode(
+        'INSTALL_FAILED',
+        data: {
+          'errorCode': code,
+          'message': PackageInstallerStatus.byCode(code).name,
+        },
+      );
+}
+
+/// The downloaded APK's signing certificate does not match the expected hash
+/// (user-provided) or the installed app's certificate.
+class SigningCertMismatchError extends ObtainiumError {
+  SigningCertMismatchError({
+    required bool hardBlock,
+    required Set<String> expected,
+    required Set<String> actual,
+  }) : super.withCode(
+         'SIGNING_CERT_MISMATCH',
+         data: {
+           'hardBlock': hardBlock,
+           'expected': expected.toList(),
+           'actual': actual.toList(),
+         },
+       );
+}
+
+class IDChangedError extends ObtainiumError {
+  IDChangedError(String newId)
+    : super.withCode('ID_CHANGED', data: {'newId': newId});
+}
+
+class RepositoryRenamedError extends ObtainiumError {
+  final String oldUrl;
+  final String newUrl;
+  RepositoryRenamedError(this.oldUrl, this.newUrl)
+    : super.withCode(
+        'REPO_RENAMED',
+        data: {'oldUrl': oldUrl, 'newUrl': newUrl},
+      );
+}
+
+class CheckUpdatesException extends ObtainiumError {
+  final List<App> updates;
+  final MultiAppMultiError errors;
+  CheckUpdatesException(this.updates, this.errors)
+    : super.withCode('CHECK_UPDATES_FAILED', unexpected: true);
+  @override
+  String toString() {
+    final base = url != null && url!.isNotEmpty ? '$message ($url)' : message;
+    return '$base\n${errors.toString()}';
+  }
+}
+
+class NotImplementedError extends ObtainiumError {
+  NotImplementedError() : super.withCode('NOT_IMPLEMENTED');
+}
+
+class MultiAppMultiError extends ObtainiumError {
+  Map<String, dynamic> rawErrors = {};
+  Map<String, List<String>> idsByErrorString = {};
+  Map<String, String> appIdNames = {};
+
+  MultiAppMultiError() : super.withCode('MULTI_ERROR', unexpected: true);
+
+  void add(String appId, dynamic error, {String? appName}) {
+    if (error is SocketException) {
+      // Use the concise message rather than the verbose OS-level toString.
+      error = error.message;
+    }
+    rawErrors[appId] = error;
+    final string = error.toString();
+    for (final entry in idsByErrorString.entries) {
+      entry.value.remove(appId);
+    }
+    idsByErrorString.removeWhere((k, v) => v.isEmpty);
+    var tempIds = idsByErrorString.remove(string);
+    if (tempIds == null) {
+      tempIds = [];
+      idsByErrorString[string] = tempIds;
+    }
+    tempIds.add(appId);
+    if (appName != null) {
+      appIdNames[appId] = appName;
+    }
+  }
+
+  String errorString(String appId, {bool includeIdsWithNames = false}) =>
+      '${appIdNames.containsKey(appId) ? '${appIdNames[appId]}${includeIdsWithNames ? ' ($appId)' : ''}' : appId}: ${rawErrors[appId].toString()}';
+
+  String errorsAppsString(
+    String errString,
+    List<String> appIds, {
+    bool includeIdsWithNames = false,
+  }) =>
+      '$errString [${list2FriendlyString(appIds.map((id) => appIdNames.containsKey(id) == true ? '${appIdNames[id]}${includeIdsWithNames ? ' ($id)' : ''}' : id).toList())}]';
+
+  String _notificationErrorSummary(int remaining) => remaining <= 0
+      ? ''
+      : '\n\n${remaining == 1 ? tr('andOneMoreError') : plural('andNMoreErrors', remaining)}';
+
+  /// Joins all error groups for a single notification, capping the body below
+  /// Android's notification text limit and summarizing any surplus groups.
+  String notificationErrorString({int maxChars = 900}) {
+    final entries = idsByErrorString.entries.toList();
+    if (entries.isEmpty) return '';
+    final groupTexts = entries
+        .map((entry) => errorsAppsString(entry.key, entry.value))
+        .toList();
+    final full = groupTexts.join('\n\n');
+    if (full.length <= maxChars) return full;
+
+    const summaryReserve = 80;
+    final contentBudget = maxChars - summaryReserve;
+    var included = '';
+    var includedGroups = 0;
+    for (final text in groupTexts) {
+      final candidate = included.isEmpty ? text : '$included\n\n$text';
+      if (candidate.length > contentBudget) break;
+      included = candidate;
+      includedGroups++;
+    }
+    if (includedGroups == 0) {
+      final cutoff = (contentBudget - 1).clamp(0, groupTexts.first.length);
+      included = '${groupTexts.first.substring(0, cutoff).trimRight()}…';
+      return '$included${_notificationErrorSummary(groupTexts.length - 1)}';
+    }
+    return '$included${_notificationErrorSummary(groupTexts.length - includedGroups)}';
+  }
+
+  @override
+  String toString() => idsByErrorString.entries
+      .map((e) => errorsAppsString(e.key, e.value))
+      .join('\n\n');
+}
+
+String localizeErrorCode(String code, Map<String, dynamic>? data) {
+  return switch (code) {
+    'NO_RELEASES' =>
+      data?['note'] != null && (data!['note'] as String).isNotEmpty
+          ? '${tr('noReleaseFound')}\n\n${data['note']}'
+          : tr('noReleaseFound'),
+    'RATE_LIMIT' => plural(
+      'tooManyRequestsTryAgainInMinutes',
+      data?['remainingMinutes'] ?? 0,
+    ),
+    'INVALID_URL' => tr(
+      'invalidURLForSource',
+      args: [data?['sourceName'] ?? ''],
+    ),
+    'CREDS_NEEDED' => tr(
+      'requiresCredentialsInSettings',
+      args: [data?['sourceName'] ?? ''],
+    ),
+    'NO_APK' => tr('noAPKFound'),
+    'MIN_UPDATE_AGE' => tr(
+      'releaseTooYoungForMinAge',
+      args: ['${data?['minAgeDays'] ?? ''}'],
+    ),
+    'NO_VERSION' => tr('noVersionFound'),
+    'UNSUPPORTED_URL' => tr('urlMatchesNoSource'),
+    'DOWNGRADE' =>
+      '${tr('cantInstallOlderVersion')} (versionCode ${data?['currentVersionCode'] ?? '?'} → ${data?['newVersionCode'] ?? '?'})',
+    'INSTALL_FAILED' => data?['message']?.toString() ?? tr('installFailed'),
+    'SIGNING_CERT_MISMATCH' =>
+      data?['hardBlock'] == true
+          ? tr('signingCertMismatchHardBlock')
+          : tr('signingCertMismatchMessage'),
+    'ID_CHANGED' => '${tr('appIdMismatch')} - ${data?['newId'] ?? ''}',
+    'REPO_RENAMED' => tr('repoRenamed'),
+    'NOT_IMPLEMENTED' => tr('functionNotImplemented'),
+    _ => data?['message']?.toString() ?? tr('unexpectedError'),
+  };
+}
+
+Locale? _appCurrentLocale;
+
+void setAppLocale(Locale? locale) => _appCurrentLocale = locale;
+
+String? get currentLanguageCode => _appCurrentLocale?.languageCode;
+
+bool isEnglish() {
+  if (_appCurrentLocale != null) return _appCurrentLocale!.languageCode == 'en';
+  return false;
+}
+
+String list2FriendlyString(List<String> list) {
+  final isUsingEnglish = isEnglish();
+  return list.length == 2
+      ? '${list[0]} ${tr('and')} ${list[1]}'
+      : list
+            .asMap()
+            .entries
+            .map(
+              (e) =>
+                  e.value +
+                  (e.key == list.length - 1
+                      ? ''
+                      : e.key == list.length - 2
+                      ? '${isUsingEnglish ? ',' : ''} ${tr('and')} '
+                      : ', '),
+            )
+            .join('');
+}

@@ -1,0 +1,681 @@
+import 'package:easy_localization/easy_localization.dart';
+import 'package:flex_color_picker/flex_color_picker.dart';
+import 'package:flutter/foundation.dart' show setEquals;
+import 'package:material_ui/material_ui.dart';
+import 'package:obtainium/theme.dart';
+import 'package:obtainium/utils/color_utils.dart' show generateRandomLightColor;
+import 'package:obtainium/components/generated_form_renderer.dart';
+import 'package:obtainium/components/ui_widgets.dart';
+import 'package:obtainium/providers/apps_provider.dart';
+import 'package:obtainium/providers/settings_provider.dart';
+import 'package:obtainium/utils/locale_utils.dart';
+import 'package:obtainium/providers/source_provider.dart';
+import 'package:provider/provider.dart';
+
+/// Fallback swatch colour for a category that has no registered colour.
+const int kDefaultCategoryColor = 0xFFCCCCCC;
+
+/// The outcome of editing a category via [showCategoryEditor].
+class CategoryEditResult {
+  /// The resulting category name; null if the category was deleted.
+  final String? name;
+
+  /// The name being edited (null when creating); lets callers migrate any
+  /// selection that referenced the old name.
+  final String? previous;
+
+  const CategoryEditResult({this.name, this.previous});
+}
+
+/// Opens the bottom-sheet editor to create (when [existingName] is null) or
+/// edit/recolor/rename/delete a category. Persists changes to the global
+/// category registry (migrating app references on rename, pruning on delete)
+/// and returns what happened, or null if cancelled.
+Future<CategoryEditResult?> showCategoryEditor(
+  BuildContext context, {
+  String? existingName,
+}) {
+  final registry = context.read<SettingsProvider>().categories;
+  final initialColor = existingName != null && registry[existingName] != null
+      ? Color(registry[existingName]!)
+      : generateRandomLightColor();
+  return showModalBottomSheet<CategoryEditResult>(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (ctx) => _CategoryEditorSheet(
+      existingName: existingName,
+      initialColor: initialColor,
+    ),
+  );
+}
+
+class _CategoryEditorSheet extends StatefulWidget {
+  final String? existingName;
+  final Color initialColor;
+
+  const _CategoryEditorSheet({this.existingName, required this.initialColor});
+
+  @override
+  State<_CategoryEditorSheet> createState() => _CategoryEditorSheetState();
+}
+
+class _CategoryEditorSheetState extends State<_CategoryEditorSheet> {
+  late final TextEditingController _nameCtrl = TextEditingController(
+    text: widget.existingName ?? '',
+  );
+  final FocusNode _nameFocus = FocusNode();
+  late Color _color = widget.initialColor;
+  late bool _excludeFromChecks;
+
+  bool get _isEditing => widget.existingName != null;
+
+  @override
+  void initState() {
+    super.initState();
+    _excludeFromChecks =
+        widget.existingName != null &&
+        context.read<SettingsProvider>().categoriesExcludedFromChecks.contains(
+          widget.existingName,
+        );
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _nameFocus.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final name = _nameCtrl.text.trim();
+    if (name.isEmpty) return;
+    final settingsProvider = context.read<SettingsProvider>();
+    final appsProvider = context.read<AppsProvider>();
+    final cats = Map<String, int>.from(settingsProvider.categories);
+    final prev = widget.existingName;
+    // Renaming onto an existing category (or creating a duplicate) must not
+    // overwrite the existing one's color or silently merge the two.
+    if (name != prev && cats.containsKey(name)) {
+      if (context.mounted) {
+        showMessage(tr('categoryAlreadyExists'), context);
+      }
+      return;
+    }
+    if (prev != null && prev != name) {
+      cats.remove(prev);
+      // Migrate apps that referenced the old name so the rename is preserved.
+      final changed = <App>[];
+      for (final aim in appsProvider.apps.values) {
+        if (aim.app.categories.contains(prev)) {
+          final migrated = aim.app.categories
+              .map((c) => c == prev ? name : c)
+              .toList();
+          // An app may already have referenced the target name; never store
+          // the same category twice.
+          final deduped = <String>[];
+          for (final c in migrated) {
+            if (!deduped.contains(c)) deduped.add(c);
+          }
+          aim.app = aim.app.copyWith(categories: deduped);
+          changed.add(aim.app);
+        }
+      }
+      if (changed.isNotEmpty) await appsProvider.saveApps(changed);
+    }
+    cats[name] = _color.toARGB32();
+    settingsProvider.setCategories(cats, appsProvider: appsProvider);
+    final excluded = Set<String>.from(
+      settingsProvider.categoriesExcludedFromChecks,
+    );
+    excluded.remove(name);
+    if (_excludeFromChecks) excluded.add(name);
+    settingsProvider.categoriesExcludedFromChecks = excluded;
+    if (context.mounted) {
+      // ignore: use_build_context_synchronously
+      Navigator.of(context).pop(CategoryEditResult(name: name, previous: prev));
+    }
+  }
+
+  Future<void> _delete() async {
+    final appsProvider = context.read<AppsProvider>();
+    final settingsProvider = context.read<SettingsProvider>();
+    final confirmed = await showConfirmDialog(
+      context,
+      title: tr('deleteCategoryQuestion'),
+      content: Text(tr('categoryDeleteWarning')),
+      autofocusConfirm: context.read<SettingsProvider>().isTV,
+    );
+    if (!confirmed) return;
+    final cats = Map<String, int>.from(settingsProvider.categories)
+      ..remove(widget.existingName);
+    settingsProvider.setCategories(cats, appsProvider: appsProvider);
+    if (mounted) {
+      Navigator.of(
+        context,
+      ).pop(CategoryEditResult(name: null, previous: widget.existingName));
+    }
+  }
+
+  Future<void> _pickCustomColor() async {
+    if (context.read<SettingsProvider>().isTV) {
+      final picked = await showTvColourPickerDialog(
+        context,
+        initialColor: _color,
+        title: tr('selectX', args: [lowerCaseUnlessLang(tr('colour'), 'de')]),
+      );
+      if (picked != null && context.mounted) setState(() => _color = picked);
+      return;
+    }
+    var picked = _color;
+    final ok = await ColorPicker(
+      color: _color,
+      onColorChanged: (c) => picked = c,
+      actionButtons: const ColorPickerActionButtons(
+        okButton: true,
+        closeButton: true,
+        dialogActionButtons: false,
+      ),
+      pickersEnabled: const <ColorPickerType, bool>{
+        ColorPickerType.both: false,
+        ColorPickerType.primary: false,
+        ColorPickerType.accent: false,
+        ColorPickerType.bw: false,
+        ColorPickerType.custom: false,
+        ColorPickerType.wheel: true,
+      },
+      title: Text(
+        tr('selectX', args: [lowerCaseUnlessLang(tr('colour'), 'de')]),
+        style: Theme.of(context).textTheme.titleLarge,
+      ),
+      wheelDiameter: 192,
+      wheelSquareBorderRadius: 32,
+      borderRadius: AppRadii.large,
+      enableShadesSelection: false,
+    ).showPickerDialog(context);
+    if (ok && context.mounted) setState(() => _color = picked);
+  }
+
+  Widget _swatch({
+    required Color color,
+    required bool selected,
+    required VoidCallback onTap,
+    Widget? icon,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: TvFocusRing(
+        borderRadius: AppRadii.large,
+        child: InkWell(
+          onTap: onTap,
+          customBorder: const CircleBorder(),
+          child: Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: selected ? cs.onSurface : cs.outlineVariant,
+                width: selected ? 3 : 1,
+              ),
+            ),
+            child: icon == null
+                ? (selected
+                      ? Icon(
+                          Icons.check,
+                          size: 20,
+                          color:
+                              ThemeData.estimateBrightnessForColor(color) ==
+                                  Brightness.dark
+                              ? Colors.white
+                              : Colors.black,
+                        )
+                      : null)
+                : Center(child: icon),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    // Account for both the on-screen keyboard and the system navigation bar,
+    // and keep the sheet scrollable so the action row never ends up hidden
+    // behind them (see #3240).
+    final bottomPadding =
+        20 +
+        MediaQuery.of(context).viewInsets.bottom +
+        MediaQuery.of(context).padding.bottom;
+    return TvInitialFocus(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(20, 4, 20, bottomPadding),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                _isEditing ? tr('editCategory') : tr('newCategory'),
+                style: textTheme.titleLarge,
+              ),
+              const SizedBox(height: 16),
+              ConnectedCard(
+                child: () {
+                  final isTV = context.read<SettingsProvider>().isTV;
+                  final field = TextField(
+                    focusNode: _nameFocus,
+                    controller: _nameCtrl,
+                    autofocus: !_isEditing && !isTV,
+                    textCapitalization: TextCapitalization.sentences,
+                    decoration: InputDecoration(labelText: tr('categoryName')),
+                    onSubmitted: (_) {
+                      if (_nameCtrl.text.trim().isNotEmpty) _save();
+                    },
+                  );
+                  return isTV
+                      ? TvTextFieldFocus(
+                          textFocusNode: _nameFocus,
+                          borderRadius: AppRadii.medium,
+                          child: field,
+                        )
+                      : field;
+                }(),
+              ),
+              const SizedBox(height: AppSpacings.sectionGap),
+              Text(tr('colour'), style: textTheme.titleSmall),
+              const SizedBox(height: AppSpacings.elementGap),
+              Wrap(
+                spacing: AppSpacings.elementGap,
+                runSpacing: AppSpacings.elementGap,
+                children: [
+                  for (final c in kPickerPalette)
+                    _swatch(
+                      color: c,
+                      selected: c.toARGB32() == _color.toARGB32(),
+                      onTap: () => setState(() => _color = c),
+                    ),
+                  _swatch(
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.surfaceContainerHighest,
+                    selected: false,
+                    onTap: () =>
+                        setState(() => _color = generateRandomLightColor()),
+                    icon: Tooltip(
+                      message: tr('randomColour'),
+                      child: const Icon(Icons.casino_outlined, size: 20),
+                    ),
+                  ),
+                  _swatch(
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.surfaceContainerHighest,
+                    selected: false,
+                    onTap: _pickCustomColor,
+                    icon: Tooltip(
+                      message: tr('custom'),
+                      child: const Icon(Icons.colorize_outlined, size: 20),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: AppSpacings.elementGap),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(tr('skipUpdateChecks')),
+                value: _excludeFromChecks,
+                onChanged: (value) =>
+                    setState(() => _excludeFromChecks = value),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  if (_isEditing)
+                    TextButton.icon(
+                      onPressed: _delete,
+                      icon: const Icon(Icons.delete_outline),
+                      label: Text(tr('remove')),
+                      style: TextButton.styleFrom(
+                        foregroundColor: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  const Spacer(),
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: Text(tr('cancel')),
+                  ),
+                  const SizedBox(width: AppSpacings.elementGap),
+                  ValueListenableBuilder<TextEditingValue>(
+                    valueListenable: _nameCtrl,
+                    builder: (context, value, _) {
+                      final canSave = value.text.trim().isNotEmpty;
+                      return FilledButton(
+                        onPressed: canSave ? _save : null,
+                        child: Text(tr('continue')),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A multi- (or single-) select field over the global category registry.
+///
+/// Tapping a chip toggles its selection; long-pressing opens the editor
+/// (recolor/rename/delete); the trailing "+ New" chip creates a category (when
+/// [allowCreate]). Selection is reported via [onChanged] but never persisted —
+/// hosts decide when to apply it, keeping it consistent with other form inputs.
+class CategorySelector extends StatefulWidget {
+  final Set<String> selected;
+  final ValueChanged<Set<String>> onChanged;
+  final bool singleSelect;
+  final bool allowCreate;
+  final WrapAlignment alignment;
+
+  /// When set, an explicit edit button opens the category manager. TV hosts
+  /// pass this because remote controls cannot trigger the chips' long-press
+  /// editing.
+  final VoidCallback? onManage;
+
+  const CategorySelector({
+    super.key,
+    required this.selected,
+    required this.onChanged,
+    this.singleSelect = false,
+    this.allowCreate = true,
+    this.alignment = WrapAlignment.start,
+    this.onManage,
+  });
+
+  @override
+  State<CategorySelector> createState() => _CategorySelectorState();
+}
+
+class _CategorySelectorState extends State<CategorySelector> {
+  late Set<String> _selected = {...widget.selected};
+
+  @override
+  void didUpdateWidget(CategorySelector oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.selected.length != widget.selected.length ||
+        !setEquals(oldWidget.selected, widget.selected)) {
+      _selected = {...widget.selected};
+    }
+  }
+
+  void _emit() => widget.onChanged({..._selected});
+
+  void _toggle(String name, bool value) {
+    setState(() {
+      if (widget.singleSelect) {
+        _selected = value ? {name} : {};
+      } else if (value) {
+        _selected.add(name);
+      } else {
+        _selected.remove(name);
+      }
+    });
+    _emit();
+  }
+
+  Future<void> _create() async {
+    final result = await showCategoryEditor(context);
+    if (result?.name == null) return;
+    if (!context.mounted) return;
+    setState(() {
+      if (widget.singleSelect) {
+        _selected = {result!.name!};
+      } else {
+        _selected.add(result!.name!);
+      }
+    });
+    _emit();
+  }
+
+  Future<void> _edit(String name) async {
+    final result = await showCategoryEditor(context, existingName: name);
+    if (result == null) return;
+    if (!context.mounted) return;
+    final wasSelected = _selected.contains(name);
+    setState(() {
+      _selected.remove(name);
+      if (result.name != null && wasSelected) _selected.add(result.name!);
+    });
+    if (wasSelected) _emit();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final categories = context.select<SettingsProvider, Map<String, int>>(
+      (p) => p.categories,
+    );
+    final names = categories.keys.toList()
+      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    final prunedSelected = _selected.where(categories.containsKey).toSet();
+    if (prunedSelected.length != _selected.length) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) {
+          setState(() {
+            _selected = prunedSelected;
+          });
+          _emit();
+        }
+      });
+    }
+
+    if (names.isEmpty && !widget.allowCreate) {
+      return Row(
+        children: [
+          Icon(Icons.label_outline, size: 18, color: cs.onSurfaceVariant),
+          const SizedBox(width: AppSpacings.sm),
+          Expanded(
+            child: Text(
+              tr('noCategories'),
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: cs.onSurfaceVariant),
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (names.isEmpty && widget.allowCreate) {
+      return Wrap(
+        alignment: widget.alignment,
+        spacing: AppSpacings.elementGap,
+        runSpacing: AppSpacings.elementGap,
+        children: [
+          Semantics(
+            container: true,
+            button: true,
+            label: tr('newCategory'),
+            excludeSemantics: true,
+            onTap: _create,
+            child: Tooltip(
+              message: tr('newCategory'),
+              child: ActionChip(label: const Text('+'), onPressed: _create),
+            ),
+          ),
+          if (widget.onManage != null) _manageButton(),
+        ],
+      );
+    }
+
+    return SizedBox(
+      width: double.infinity,
+      child: Wrap(
+        alignment: widget.alignment,
+        spacing: AppSpacings.elementGap,
+        runSpacing: AppSpacings.elementGap,
+        children: [
+          for (final name in names)
+            Tooltip(
+              message: tr('editCategory'),
+              child: Semantics(
+                onLongPress: () => _edit(name),
+                child: GestureDetector(
+                  onLongPress: () => _edit(name),
+                  child: FilterChip(
+                    avatar: CircleAvatar(
+                      backgroundColor: Color(
+                        categories[name] ?? kDefaultCategoryColor,
+                      ),
+                      radius: 7,
+                    ),
+                    label: Text(
+                      name,
+                      softWrap: true,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    selected: _selected.contains(name),
+                    onSelected: (v) => _toggle(name, v),
+                    selectedColor: Color(
+                      categories[name] ?? kDefaultCategoryColor,
+                    ).withValues(alpha: 0.22),
+                    showCheckmark: true,
+                  ),
+                ),
+              ),
+            ),
+          // Inline with the categories so the row doesn't take extra space
+          // when the list wraps (see #3221).
+          if (widget.allowCreate)
+            Tooltip(
+              message: tr('newCategory'),
+              child: ActionChip(label: const Text('+'), onPressed: _create),
+            ),
+          if (widget.onManage != null) _manageButton(),
+        ],
+      ),
+    );
+  }
+
+  Widget _manageButton() => IconButton(
+    icon: const Icon(Icons.edit_outlined),
+    tooltip: tr('editCategory'),
+    onPressed: widget.onManage,
+  );
+}
+
+/// Dialog wrapper around [CategoryManager], used where a host cannot rely on
+/// long-press editing (TV remotes).
+Future<void> showCategoryManagerDialog(BuildContext context) {
+  return showDialog<void>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text(tr('categories')),
+      content: const SingleChildScrollView(
+        child: CategoryManager(autofocusFirst: true),
+      ),
+      actions: [
+        FilledButton.tonal(
+          onPressed: () => Navigator.of(ctx).pop(),
+          child: Text(tr('continue')),
+        ),
+      ],
+    ),
+  );
+}
+
+/// Manage-only view of the category registry (used in Settings): every category
+/// is an editable chip (tap to recolor/rename/delete) plus a "+ New" action.
+class CategoryManager extends StatelessWidget {
+  final bool autofocusFirst;
+
+  const CategoryManager({super.key, this.autofocusFirst = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final categories = context.select<SettingsProvider, Map<String, int>>(
+      (p) => p.categories,
+    );
+    final names = categories.keys.toList()
+      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    if (names.isEmpty) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            tr('noCategories'),
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: cs.onSurfaceVariant),
+          ),
+          const Spacer(),
+          Semantics(
+            container: true,
+            button: true,
+            label: tr('newCategory'),
+            excludeSemantics: true,
+            onTap: () => showCategoryEditor(context),
+            child: Tooltip(
+              message: tr('newCategory'),
+              child: ActionChip(
+                autofocus: autofocusFirst,
+                label: const Text('+'),
+                onPressed: () => showCategoryEditor(context),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    return SizedBox(
+      width: double.infinity,
+      child: Wrap(
+        spacing: AppSpacings.elementGap,
+        runSpacing: AppSpacings.elementGap,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          for (var i = 0; i < names.length; i++)
+            ActionChip(
+              autofocus: autofocusFirst && i == 0,
+              avatar: CircleAvatar(
+                backgroundColor: Color(categories[names[i]]!),
+                radius: 7,
+              ),
+              label: Text(
+                names[i],
+                softWrap: true,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
+              onPressed: () =>
+                  showCategoryEditor(context, existingName: names[i]),
+            ),
+          // Inline with the categories so the row doesn't take extra space
+          // when the list wraps (see #3221).
+          Semantics(
+            container: true,
+            button: true,
+            label: tr('newCategory'),
+            excludeSemantics: true,
+            onTap: () => showCategoryEditor(context),
+            child: Tooltip(
+              message: tr('newCategory'),
+              child: ActionChip(
+                label: const Text('+'),
+                onPressed: () => showCategoryEditor(context),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

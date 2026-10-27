@@ -1,0 +1,1112 @@
+import 'dart:async';
+
+import 'package:easy_localization/easy_localization.dart';
+import 'package:material_ui/material_ui.dart';
+import 'package:obtainium/components/ui_widgets.dart';
+import 'package:obtainium/components/generated_form_renderer.dart';
+import 'package:obtainium/components/category_editor.dart';
+import 'package:obtainium/app_sources/samsunggalaxystore.dart';
+import 'package:obtainium/custom_errors.dart';
+import 'package:obtainium/pages/app.dart';
+import 'package:obtainium/pages/import_export.dart';
+import 'package:obtainium/providers/apps_provider.dart';
+import 'package:obtainium/providers/notifications_provider.dart';
+import 'package:obtainium/providers/settings_provider.dart';
+import 'package:obtainium/providers/source_provider.dart';
+import 'package:obtainium/theme.dart';
+import 'package:obtainium/utils/nav_helper.dart';
+import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher_string.dart';
+
+class AddAppPage extends StatefulWidget {
+  const AddAppPage({super.key, this.initialUrl});
+
+  /// When provided (e.g. from a deep link), the URL is applied automatically
+  /// after the first frame.
+  final String? initialUrl;
+
+  @override
+  State<AddAppPage> createState() => AddAppPageState();
+}
+
+class AddAppPageState extends State<AddAppPage> {
+  late final AppsProvider appsProvider;
+  late final SettingsProvider settingsProvider;
+  late final NotificationsProvider notificationsProvider;
+  bool _providersInitialized = false;
+
+  bool gettingAppInfo = false;
+  bool searching = false;
+
+  String userInput = '';
+  String searchQuery = '';
+  String? pickedSourceOverride;
+  String? _previousPickedSourceOverride;
+  AppSource? pickedSource;
+  Map<String, dynamic> additionalSettings = {};
+  bool additionalSettingsValid = true;
+  bool _urlValid = false;
+  bool _prevValid = false;
+  bool inferAppIdIfOptional = true;
+  List<String> pickedCategories = [];
+  int urlInputKey = 0;
+  late final SourceProvider sourceProvider;
+
+  Future<String?>? _sourceNoteFuture;
+  String? _sourceNoteSourceKey;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initialUrl != null && widget.initialUrl!.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) processInitialUrl(widget.initialUrl);
+      });
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_providersInitialized) {
+      appsProvider = context.read<AppsProvider>();
+      settingsProvider = context.read<SettingsProvider>();
+      notificationsProvider = context.read<NotificationsProvider>();
+      sourceProvider = context.read<SourceProvider>();
+      _providersInitialized = true;
+    }
+  }
+
+  void processInitialUrl(String? url) {
+    if (url != null && url.isNotEmpty) {
+      linkFn(url);
+    }
+  }
+
+  void linkFn(String input) {
+    try {
+      if (input.isEmpty) {
+        throw UnsupportedURLError();
+      }
+      sourceProvider.getSource(input);
+      changeUserInput(input, true, false, updateUrlInput: true);
+    } catch (e) {
+      changeUserInput(input, false, false, updateUrlInput: true);
+      showError(e, context);
+    }
+  }
+
+  void changeUserInput(
+    String input,
+    bool valid,
+    bool isBuilding, {
+    bool updateUrlInput = false,
+    String? overrideSource,
+    Map<String, dynamic> appSettings = const {},
+  }) {
+    if (!isBuilding) {
+      userInput = input;
+      if (overrideSource != null) {
+        pickedSourceOverride = overrideSource;
+      }
+      final bool overrideChanged =
+          pickedSourceOverride != _previousPickedSourceOverride;
+      _previousPickedSourceOverride = pickedSourceOverride;
+      if (updateUrlInput) {
+        urlInputKey++;
+      }
+      _urlValid = valid || pickedSourceOverride != null;
+      final prevHost = pickedSource?.hosts.isNotEmpty == true
+          ? pickedSource?.hosts.first
+          : null;
+      AppSource? source;
+      try {
+        source = sourceProvider.getSource(
+          userInput,
+          overrideSource: pickedSourceOverride,
+        );
+      } catch (_) {
+        source = null;
+      }
+      if (pickedSource?.sourceIdentifier != source?.sourceIdentifier ||
+          overrideChanged ||
+          (prevHost != null && prevHost != source?.hosts.firstOrNull)) {
+        pickedSource = source;
+        additionalSettings = source != null
+            ? getDefaultValuesFromFormItems(
+                source.combinedAppSpecificSettingFormItems,
+              )
+            : {};
+        if (pickedSource != null) {
+          additionalSettings.addAll(
+            pickedSource!.runOnAddAppInputChange(userInput),
+          );
+        }
+        inferAppIdIfOptional = true;
+      } else if (valid &&
+          !updateUrlInput &&
+          _prevValid &&
+          appSettings.isEmpty) {
+        return;
+      }
+      if (source != null) additionalSettings.addAll(appSettings);
+      additionalSettingsValid =
+          source == null ||
+          _requiredFormFieldsFilled(source, additionalSettings);
+      _prevValid = valid;
+      _updateSourceNote();
+      if (mounted) setState(() {});
+    }
+  }
+
+  /// Returns whether all required text fields in the source's app-specific
+  /// settings form have non-empty values in [additionalSettings].
+  bool _requiredFormFieldsFilled(
+    AppSource source,
+    Map<String, dynamic> additionalSettings,
+  ) {
+    for (var row in source.combinedAppSpecificSettingFormItems) {
+      for (var item in row) {
+        if (item is GeneratedFormTextField && item.required) {
+          final value = additionalSettings[item.key];
+          if (value == null || value.toString().trim().isEmpty) {
+            return false;
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  /// Host portion of the search dialog's instance URL field, tolerating
+  /// scheme-less input. Returns '' when the input is not parseable.
+  static String _searchUrlHost(String url) {
+    var raw = url.trim();
+    if (raw.isEmpty) return '';
+    if (!raw.toLowerCase().startsWith('http://') &&
+        !raw.toLowerCase().startsWith('https://')) {
+      raw = 'https://$raw';
+    }
+    return Uri.tryParse(raw)?.host ?? '';
+  }
+
+  void setSourceOverride(String? override) {
+    pickedSourceOverride = override;
+    changeUserInput(userInput, true, false);
+  }
+
+  void _updateSourceNote() {
+    if (pickedSource != null) {
+      final sourceKey = pickedSource!.name;
+      if (_sourceNoteSourceKey != sourceKey) {
+        _sourceNoteSourceKey = sourceKey;
+        _sourceNoteFuture = pickedSource?.getSourceNote();
+      }
+    } else {
+      _sourceNoteFuture = null;
+      _sourceNoteSourceKey = null;
+    }
+  }
+
+  Future<bool> getTrackOnlyConfirmationIfNeeded(
+    bool userPickedTrackOnly,
+    BuildContext context, {
+    bool ignoreHideSetting = false,
+  }) async {
+    final s = pickedSource!;
+    final useTrackOnly = userPickedTrackOnly || s.enforceTrackOnly;
+    if (useTrackOnly &&
+        (!settingsProvider.hideTrackOnlyWarning || ignoreHideSetting)) {
+      if (!context.mounted) return false;
+      final values = await showDialog(
+        context: context,
+        builder: (BuildContext ctx) {
+          return GeneratedFormModal(
+            initValid: true,
+            title: tr(
+              'xIsTrackOnly',
+              args: [s.enforceTrackOnly ? tr('source') : tr('app')],
+            ),
+            items: [
+              [GeneratedFormSwitch('hide', label: tr('dontShowAgain'))],
+            ],
+            message:
+                '${s.enforceTrackOnly ? tr('appsFromSourceAreTrackOnly') : tr('youPickedTrackOnly')}\n\n${tr('trackOnlyAppDescription')}',
+          );
+        },
+      );
+      if (values != null) {
+        settingsProvider.hideTrackOnlyWarning = values['hide'] == true;
+      }
+      return useTrackOnly && values != null;
+    } else {
+      return true;
+    }
+  }
+
+  Future<bool> getReleaseDateAsVersionConfirmationIfNeeded(
+    BuildContext context,
+  ) async {
+    if (additionalSettings['releaseDateAsVersion'] != true) return true;
+    if (!context.mounted) return false;
+    return await showContinueCancelDialog(
+      context,
+      title: tr('releaseDateAsVersion'),
+      message: tr('releaseDateAsVersionExplanation'),
+    );
+  }
+
+  Future<void> addApp(BuildContext context) async {
+    gettingAppInfo = true;
+    setState(() {});
+    try {
+      final userPickedTrackOnly = additionalSettings['trackOnly'] == true;
+      App? app;
+      var confirmed = await getTrackOnlyConfirmationIfNeeded(
+        userPickedTrackOnly,
+        context,
+      );
+      if (!context.mounted) return;
+      if (confirmed) {
+        confirmed = await getReleaseDateAsVersionConfirmationIfNeeded(context);
+      }
+      if (!context.mounted) return;
+      if (confirmed) {
+        final s = pickedSource!;
+        final trackOnly = s.enforceTrackOnly || userPickedTrackOnly;
+        var addedWithoutCheck = false;
+        try {
+          app = await sourceProvider.getApp(
+            s,
+            userInput.trim(),
+            additionalSettings,
+            trackOnlyOverride: trackOnly,
+            sourceIsOverriden: pickedSourceOverride != null,
+            inferAppIdIfOptional: inferAppIdIfOptional,
+          );
+        } catch (e) {
+          // Only offer the fallback for unexpected failures (network issues,
+          // source bugs); typed errors mean the source was reachable and the
+          // user should see the real problem.
+          final unexpected = e is! ObtainiumError || e.unexpected;
+          if (!unexpected || !settingsProvider.allowAddingAppsWithoutCheck) {
+            rethrow;
+          }
+          if (!context.mounted) return;
+          final proceed = await showConfirmDialog(
+            context,
+            title: tr('addWithoutCheckQuestion'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(tr('addWithoutCheckExplanation')),
+                  const SizedBox(height: AppSpacings.elementGap),
+                  Text('$e'),
+                ],
+              ),
+            ),
+            confirmText: tr('addAnyway'),
+            autofocusConfirm: settingsProvider.isTV,
+          );
+          if (!proceed) return;
+          if (!context.mounted) return;
+          app = sourceProvider.buildPlaceholderApp(
+            s,
+            userInput.trim(),
+            additionalSettings,
+            sourceIsOverriden: pickedSourceOverride != null,
+          );
+          addedWithoutCheck = true;
+        }
+        if (!addedWithoutCheck &&
+            isTempId(app) &&
+            !app.settings.getBool('trackOnly')) {
+          if (!context.mounted) return;
+          final apkUrl = await appsProvider.confirmAppFileUrl(
+            app,
+            context,
+            false,
+          );
+          if (apkUrl == null) {
+            throw ObtainiumError(tr('cancelled'));
+          }
+          app = app.copyWith(
+            preferredApkIndex: app.apkUrls
+                .map((e) => e.value)
+                .toList()
+                .indexOf(apkUrl.value),
+          );
+          if (!context.mounted) return;
+          final downloadedArtifact = await appsProvider.downloadApp(
+            app,
+            context,
+            notificationsProvider: notificationsProvider,
+          );
+          DownloadedApk? downloadedFile;
+          DownloadedDir? downloadedDir;
+          if (downloadedArtifact is DownloadedApk) {
+            downloadedFile = downloadedArtifact;
+          } else if (downloadedArtifact is DownloadedDir) {
+            downloadedDir = downloadedArtifact;
+          }
+          if (downloadedFile == null && downloadedDir == null) {
+            throw ObtainiumError(tr('downloadFailed'));
+          }
+          app = app.copyWith(id: downloadedFile?.appId ?? downloadedDir!.appId);
+        }
+        if (appsProvider.apps.containsKey(app.id)) {
+          final existing = appsProvider.apps[app.id];
+          throw ObtainiumError(
+            '${tr('appAlreadyAdded')}: ${existing?.app.name ?? app.id} (${app.id})',
+          );
+        }
+        if (!addedWithoutCheck &&
+            (app.settings.getBool('trackOnly') ||
+                !app.settings.getBool('versionDetection'))) {
+          app = app.copyWith(installedVersion: app.latestVersion);
+        }
+        app = app.copyWith(categories: pickedCategories);
+        await appsProvider.saveApps([app], onlyIfExists: false);
+      }
+      if (app != null && context.mounted) {
+        final route = MaterialPageRoute<void>(
+          traversalEdgeBehavior: traversalEdgeBehaviorFor(context),
+          builder: (context) => AppPage(appId: app!.id),
+        );
+        unawaited(Navigator.of(context).pushReplacement(route));
+      }
+    } catch (e) {
+      if (context.mounted) showError(e, context);
+    } finally {
+      gettingAppInfo = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> runSearch(BuildContext context) async {
+    settingsProvider.lightImpact();
+    searching = true;
+    setState(() {});
+    final options = sourceProvider.sources
+        .where((source) => source.canSearch)
+        .expand(
+          (source) => source.searchProfiles.map(
+            (profile) => (source: source, profile: profile),
+          ),
+        )
+        .toList();
+    final sourceStrings = {
+      for (final option in options) option.profile.id: [option.profile.name],
+    };
+    try {
+      final searchSources =
+          await showDialog<List<String>?>(
+            context: context,
+            builder: (BuildContext ctx) {
+              return SelectionModal(
+                title: tr('selectX', args: [plural('source', 2).toLowerCase()]),
+                entries: sourceStrings,
+                selectedByDefault: true,
+                onlyOneSelectionAllowed: false,
+                titlesAreLinks: false,
+                deselectThese: settingsProvider.searchDeselected,
+              );
+            },
+          ) ??
+          [];
+      if (searchSources.isNotEmpty) {
+        settingsProvider.searchDeselected = sourceStrings.keys
+            .where((s) => !searchSources.contains(s))
+            .toList();
+        final List<
+          ({
+            String source,
+            SourceSearchProfile profile,
+            Map<String, List<String>> entries,
+          })?
+        >
+        results = (await Future.wait(
+          options
+              .where((option) => searchSources.contains(option.profile.id))
+              .map((option) async {
+                final e = option.source;
+                try {
+                  Map<String, dynamic>? querySettings = Map.from(
+                    option.profile.querySettings,
+                  );
+                  if (e.includeAdditionalOptsInMainSearch) {
+                    querySettings = await showDialog<Map<String, dynamic>?>(
+                      context: context,
+                      builder: (BuildContext ctx) {
+                        String currentUrl = e.hosts.isNotEmpty
+                            ? e.hosts[0]
+                            : '';
+                        String currentHost = _searchUrlHost(currentUrl);
+                        List<GeneratedFormItem> sourceItems = e
+                            .searchQuerySettingItemsForUrl(
+                              currentUrl,
+                              settingsProvider: settingsProvider,
+                            );
+                        return StatefulBuilder(
+                          builder:
+                              (BuildContext ctx, StateSetter setDialogState) {
+                                return GeneratedFormModal(
+                                  title: tr('searchX', args: [e.name]),
+                                  items: [
+                                    ...sourceItems.map((item) => [item]),
+                                    [
+                                      GeneratedFormTextField(
+                                        'url',
+                                        label: e.hosts.isNotEmpty
+                                            ? tr('overrideSource')
+                                            : plural('url', 1).substring(2),
+                                        autoCompleteOptions: [
+                                          ...(e.hosts.isNotEmpty
+                                              ? [e.hosts[0]]
+                                              : []),
+                                          ...appsProvider.apps.values
+                                              .where(
+                                                (a) =>
+                                                    sourceProvider
+                                                        .getSource(
+                                                          a.app.url,
+                                                          overrideSource: a
+                                                              .app
+                                                              .overrideSource,
+                                                        )
+                                                        .sourceIdentifier ==
+                                                    e.sourceIdentifier,
+                                              )
+                                              .map((a) {
+                                                final uri = Uri.parse(
+                                                  a.app.url,
+                                                );
+                                                return '${uri.origin}${uri.path}';
+                                              }),
+                                        ],
+                                        value: currentUrl,
+                                        required: true,
+                                      ),
+                                    ],
+                                  ],
+                                  onValueChanges: (values, valid, isBuilding) {
+                                    if (isBuilding) return;
+                                    final newUrl =
+                                        values['url'] as String? ?? '';
+                                    currentUrl = newUrl;
+                                    final newHost = _searchUrlHost(newUrl);
+                                    if (newHost != currentHost) {
+                                      currentHost = newHost;
+                                      setDialogState(() {
+                                        sourceItems = e
+                                            .searchQuerySettingItemsForUrl(
+                                              newUrl,
+                                              settingsProvider:
+                                                  settingsProvider,
+                                            );
+                                      });
+                                    }
+                                  },
+                                );
+                              },
+                        );
+                      },
+                    );
+                    if (querySettings == null) {
+                      return null;
+                    }
+                    querySettings = {
+                      ...option.profile.querySettings,
+                      ...querySettings,
+                    };
+                  }
+                  return (
+                    source: e.sourceIdentifier,
+                    profile: option.profile,
+                    entries: await e.search(
+                      searchQuery,
+                      querySettings: querySettings,
+                    ),
+                  );
+                } catch (err) {
+                  final errorToShow = err is ObtainiumError
+                      ? ObtainiumError(
+                          err.message,
+                          code: err.code,
+                          unexpected: true,
+                          stack: err.stack,
+                          data: err.data,
+                        )
+                      : err;
+                  if (context.mounted) showError(errorToShow, context);
+                  return null;
+                }
+              }),
+        )).where((a) => a != null).toList();
+
+        if (!context.mounted) return;
+
+        final res =
+            <
+              String,
+              ({
+                String source,
+                String url,
+                List<String> description,
+                Map<String, dynamic> appSettings,
+              })
+            >{};
+        var si = 0;
+        var done = false;
+        while (!done) {
+          done = true;
+          for (var r in results) {
+            if (r!.entries.length > si) {
+              done = false;
+              final singleRes = r.entries.entries.elementAt(si);
+              final description = List<String>.from(singleRes.value);
+              if (options
+                      .where(
+                        (option) => option.source.sourceIdentifier == r.source,
+                      )
+                      .length >
+                  1) {
+                if (description.isEmpty) description.add(singleRes.key);
+                final author = description.length > 1 ? description[1] : '';
+                if (description.length < 2) description.add('');
+                description[1] = [
+                  r.profile.name,
+                  author,
+                ].where((part) => part.isNotEmpty).join(' · ');
+              }
+              res[res.length.toString()] = (
+                source: r.source,
+                url: singleRes.key,
+                description: description,
+                appSettings: r.profile.appSettings,
+              );
+            }
+          }
+          si++;
+        }
+        if (res.isEmpty) {
+          throw ObtainiumError(tr('noResults'));
+        }
+        if (!context.mounted) return;
+        final List<String>? selectedIds = await showDialog<List<String>?>(
+          context: context,
+          builder: (BuildContext ctx) {
+            return SelectionModal(
+              entries: res.map((k, v) => MapEntry(k, v.description)),
+              entryUrls: res.map((k, v) => MapEntry(k, v.url)),
+              selectedByDefault: false,
+              onlyOneSelectionAllowed: true,
+            );
+          },
+        );
+        if (selectedIds != null && selectedIds.isNotEmpty) {
+          final selected = res[selectedIds[0]]!;
+          changeUserInput(
+            selected.url,
+            true,
+            false,
+            updateUrlInput: true,
+            overrideSource: selected.source,
+            appSettings: selected.appSettings,
+          );
+        }
+      }
+    } catch (e) {
+      if (context.mounted) showError(e, context);
+    } finally {
+      searching = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  bool get shouldShowSearchBar =>
+      sourceProvider.sources.where((e) => e.canSearch).isNotEmpty &&
+      pickedSource == null &&
+      userInput.isEmpty;
+
+  void openSourcesListDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return GeneratedFormModal(
+          singleNullReturnButton: tr('ok'),
+          title: tr('supportedSources'),
+          items: const [],
+          additionalWidgets: [
+            Wrap(
+              spacing: AppSpacings.elementGap,
+              runSpacing: AppSpacings.elementGap,
+              children: sourceProvider.sources.map((e) {
+                return ActionChip(
+                  label: Text(
+                    '${e.name}${e.enforceTrackOnly ? ' ${tr('trackOnlyInBrackets')}' : ''}${e.canSearch ? ' ${tr('searchableInBrackets')}' : ''}',
+                  ),
+                  onPressed: e.hosts.isNotEmpty
+                      ? () {
+                          unawaited(
+                            launchUrlString(
+                              'https://${e.hosts[0]}',
+                              mode: LaunchMode.externalApplication,
+                            ),
+                          );
+                        }
+                      : null,
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              '${tr('note')}:',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 4),
+            Text(tr('selfHostedNote', args: [tr('overrideSource')])),
+          ],
+        );
+      },
+    );
+  }
+
+  void openCrowdsourcedConfigs() {
+    unawaited(
+      launchUrlString(
+        'https://apps.obtainium.imranr.dev/',
+        mode: LaunchMode.externalApplication,
+      ),
+    );
+  }
+
+  Widget _buildSourceSpecificForm(SettingsProvider settingsProvider) {
+    final s = pickedSource!;
+    final formItems = cloneFormItems(s.combinedAppSpecificSettingFormItems);
+    for (var row in formItems) {
+      for (var item in row) {
+        if (additionalSettings[item.key] != null) {
+          item.value = additionalSettings[item.key];
+        }
+      }
+    }
+    if (settingsProvider.includePrereleasesByDefault ||
+        settingsProvider.shizukuPretendToBeGooglePlay) {
+      for (var row in formItems) {
+        for (var item in row) {
+          if (item.key == 'includePrereleases' &&
+              settingsProvider.includePrereleasesByDefault) {
+            item.value = true;
+          }
+          if (item.key == 'shizukuPretendToBeGooglePlay' &&
+              settingsProvider.shizukuPretendToBeGooglePlay &&
+              !(s is SamsungGalaxyStore &&
+                  additionalSettings['shizukuPretendToBeGalaxyStore'] ==
+                      true)) {
+            item.value = true;
+          }
+        }
+      }
+    }
+    return GeneratedForm(
+      tileMode: true,
+      key: Key(
+        '${s.name}-${s.hostChanged.toString()}-${s.hostIdenticalDespiteAnyChange.toString()}',
+      ),
+      items: [
+        ...formItems,
+        ...(pickedSourceOverride != null
+            ? s.sourceConfigSettingFormItems.map((e) => [e])
+            : []),
+      ],
+      onValueChanges: (values, valid, isBuilding) {
+        if (!isBuilding) {
+          setState(() {
+            additionalSettings = values;
+            additionalSettingsValid = valid;
+          });
+        } else {
+          additionalSettings = values;
+          additionalSettingsValid = valid;
+        }
+      },
+    );
+  }
+
+  Widget _getAdditionalOptsCol(
+    BuildContext context,
+    SettingsProvider settingsProvider,
+  ) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      const SizedBox(height: AppSpacings.xl),
+      Text(
+        tr('additionalOptsFor', args: [pickedSource?.name ?? tr('source')]),
+        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+          color: Theme.of(context).colorScheme.primary,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      _buildSourceSpecificForm(settingsProvider),
+      const SizedBox(height: AppSpacings.md),
+      CardTile(
+        padding: const EdgeInsets.all(AppSpacings.md),
+        child: CategorySelector(
+          selected: pickedCategories.toSet(),
+          alignment: WrapAlignment.start,
+          onChanged: (categories) {
+            pickedCategories = categories.toList();
+          },
+        ),
+      ),
+      if (pickedSource?.appIdInferIsOptional == true) ...[
+        const SizedBox(height: 12),
+        GeneratedForm(
+          tileMode: true,
+          key: const Key('inferAppIdIfOptional'),
+          items: [
+            [
+              GeneratedFormSwitch(
+                'inferAppIdIfOptional',
+                label: tr('tryInferAppIdFromCode'),
+                value: inferAppIdIfOptional,
+              ),
+            ],
+          ],
+          onValueChanges: (values, valid, isBuilding) {
+            if (!isBuilding) {
+              setState(() {
+                inferAppIdIfOptional = values['inferAppIdIfOptional'];
+              });
+            }
+          },
+        ),
+      ],
+      if (pickedSource?.enforceTrackOnly == true) ...[
+        const SizedBox(height: 12),
+        GeneratedForm(
+          tileMode: true,
+          key: Key(
+            '${pickedSource?.name}-${pickedSource?.hostChanged.toString()}-${pickedSource?.hostIdenticalDespiteAnyChange.toString()}-appId',
+          ),
+          items: [
+            [
+              GeneratedFormTextField(
+                'appId',
+                label: '${tr('appId')} - ${tr('custom')}',
+                required: false,
+                additionalValidators: [
+                  (value) {
+                    if (value == null || value.isEmpty) {
+                      return null;
+                    }
+                    final isValid = RegExp(
+                      r'^([A-Za-z]{1}[A-Za-z\d_]*\.)+[A-Za-z][A-Za-z\d_]*$',
+                    ).hasMatch(value);
+                    if (!isValid) {
+                      return tr('invalidInput');
+                    }
+                    return null;
+                  },
+                ],
+              ),
+            ],
+          ],
+          onValueChanges: (values, valid, isBuilding) {
+            if (!isBuilding) {
+              setState(() {
+                additionalSettings['appId'] = values['appId'];
+              });
+            }
+          },
+        ),
+      ],
+    ],
+  );
+
+  Widget _getSourcesListWidget(BuildContext context) => Padding(
+    padding: EdgeInsets.only(
+      left: 16,
+      right: 16,
+      top: MediaQuery.of(context).padding.top,
+      bottom: MediaQuery.of(context).padding.bottom,
+    ),
+    child: Wrap(
+      direction: Axis.horizontal,
+      alignment: WrapAlignment.spaceBetween,
+      spacing: AppSpacings.md,
+      children: [
+        ActionChip(
+          onPressed: () {
+            openSourcesListDialog(context);
+          },
+          avatar: const Icon(Icons.dynamic_feed_outlined, size: 18),
+          label: Text(tr('supportedSources')),
+        ),
+        ActionChip(
+          avatar: const Icon(Icons.public, size: 18),
+          label: Text(tr('crowdsourcedConfigsShort')),
+          onPressed: () {
+            openCrowdsourcedConfigs();
+          },
+        ),
+      ],
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final SettingsProvider settingsProvider = context.watch<SettingsProvider>();
+
+    final bool doingSomething = gettingAppInfo || searching;
+    return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      bottomNavigationBar: pickedSource == null
+          ? _getSourcesListWidget(context)
+          : null,
+      body: CustomScrollView(
+        slivers: <Widget>[
+          CustomAppBar(title: tr('addApp')),
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                16,
+                0,
+                16,
+                MediaQuery.of(context).padding.bottom,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildUrlRow(context, settingsProvider, doingSomething),
+                  if (pickedSource != null) ...[
+                    const SizedBox(height: 13),
+                    _buildSourceOverrideField(context),
+                  ],
+                  if (shouldShowSearchBar) ...[
+                    const SizedBox(height: 13),
+                    _buildSearchRow(doingSomething),
+                  ],
+                  if (pickedSource != null) _buildSourceNoteCard(context),
+                  if (pickedSource != null)
+                    _getAdditionalOptsCol(context, settingsProvider),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUrlRow(
+    BuildContext context,
+    SettingsProvider settingsProvider,
+    bool doingSomething,
+  ) {
+    final source = pickedSource;
+    final canAdd =
+        !doingSomething &&
+        source != null &&
+        _urlValid &&
+        userInput.trim().isNotEmpty &&
+        (source.combinedAppSpecificSettingFormItems.isEmpty ||
+            additionalSettingsValid);
+    final addAction = _fieldAction(
+      loading: gettingAppInfo,
+      icon: Icons.add_rounded,
+      tooltip: tr('add'),
+      onPressed: canAdd
+          ? () {
+              settingsProvider.selectionClick();
+              addApp(context);
+            }
+          : null,
+    );
+    final form = GeneratedForm(
+      key: Key('url-$urlInputKey'),
+      tileMode: true,
+      autofocusFirstTextField: settingsProvider.isTV,
+      items: [
+        [
+          GeneratedFormTextField(
+            'appSourceURL',
+            label: tr('appSourceURL'),
+            value: userInput,
+            required: false,
+            suffixIcon: settingsProvider.isTV
+                ? null
+                : Padding(
+                    padding: const EdgeInsets.only(right: AppSpacings.sm),
+                    child: addAction,
+                  ),
+            additionalValidators: [
+              (value) {
+                if (value == null || value.trim().isEmpty) {
+                  return null;
+                }
+                try {
+                  sourceProvider
+                      .getSource(value, overrideSource: pickedSourceOverride)
+                      .standardizeUrl(value);
+                } catch (e) {
+                  return e is String
+                      ? e
+                      : e is ObtainiumError
+                      ? e.toString()
+                      : tr('error');
+                }
+                return null;
+              },
+            ],
+          ),
+        ],
+      ],
+      onValueChanges: (values, valid, isBuilding) {
+        changeUserInput(values['appSourceURL']!, valid, isBuilding);
+      },
+    );
+    if (!settingsProvider.isTV) return form;
+    return Row(
+      children: [
+        Expanded(child: form),
+        const SizedBox(width: AppSpacings.sm),
+        Padding(
+          padding: const EdgeInsets.only(right: AppSpacings.sm),
+          child: addAction,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSourceOverrideField(BuildContext context) {
+    return GeneratedForm(
+      tileMode: true,
+      items: [
+        [
+          GeneratedFormDropdown(
+            'overrideSource',
+            value: pickedSourceOverride ?? '',
+            [
+              MapEntry('', tr('none')),
+              ...sourceProvider.sources
+                  .where(
+                    (s) =>
+                        s.allowOverride ||
+                        (pickedSource!.sourceIdentifier == s.sourceIdentifier),
+                  )
+                  .map((s) => MapEntry(s.sourceIdentifier, s.name)),
+            ],
+            label: tr('overrideSource'),
+          ),
+        ],
+      ],
+      onValueChanges: (values, valid, isBuilding) {
+        final newOverride =
+            (values['overrideSource'] == null || values['overrideSource'] == '')
+            ? null
+            : values['overrideSource'] as String?;
+        setSourceOverride(newOverride);
+      },
+    );
+  }
+
+  Widget _buildSearchRow(bool doingSomething) {
+    final isTV = context.read<SettingsProvider>().isTV;
+    final searchAction = _fieldAction(
+      loading: searching,
+      icon: Icons.search_rounded,
+      tooltip: tr('search'),
+      onPressed: doingSomething ? null : () => runSearch(context),
+    );
+    final form = GeneratedForm(
+      tileMode: true,
+      items: [
+        [
+          GeneratedFormTextField(
+            'searchSomeSources',
+            label: tr('searchSomeSourcesLabel'),
+            required: false,
+            suffixIcon: isTV
+                ? null
+                : Padding(
+                    padding: const EdgeInsets.only(right: AppSpacings.sm),
+                    child: searchAction,
+                  ),
+          ),
+        ],
+      ],
+      onValueChanges: (values, valid, isBuilding) {
+        if (values.isNotEmpty && valid && !isBuilding) {
+          setState(() {
+            searchQuery = values['searchSomeSources']!.trim();
+          });
+        }
+      },
+    );
+    if (!isTV) return form;
+    return Row(
+      children: [
+        Expanded(child: form),
+        const SizedBox(width: AppSpacings.sm),
+        Padding(
+          padding: const EdgeInsets.only(right: AppSpacings.sm),
+          child: searchAction,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSourceNoteCard(BuildContext context) {
+    return FutureBuilder(
+      future: _sourceNoteFuture,
+      builder: (ctx, val) {
+        if (val.data != null && val.data!.isNotEmpty) {
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(0, 16, 0, 0),
+            child: ConnectedCard(
+              isFirst: true,
+              isLast: true,
+              padding: AppPaddings.cardInner,
+              child: Text(
+                val.data!,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
+          );
+        }
+        return const SizedBox.shrink();
+      },
+    );
+  }
+
+  Widget _fieldAction({
+    required bool loading,
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback? onPressed,
+  }) {
+    return SizedBox.square(
+      dimension: 48,
+      child: loading
+          ? Center(child: _smallSpinner())
+          : IconButton(
+              icon: Icon(icon),
+              tooltip: tooltip,
+              onPressed: onPressed,
+            ),
+    );
+  }
+
+  Widget _smallSpinner() {
+    return const SizedBox(
+      width: 20,
+      height: 20,
+      child: CircularProgressIndicator(strokeWidth: 2),
+    );
+  }
+}
