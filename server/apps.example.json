@@ -1,0 +1,9 @@
+{
+  "apps": [
+    "https://github.com/ImranR98/Obtainium",
+    {
+      "url": "https://github.com/AntennaPod/AntennaPod",
+      "settings": { "apkFilterRegEx": "free" }
+    }
+  ]
+}

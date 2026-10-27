@@ -14,14 +14,15 @@ import 'package:obtainium/providers/apps_provider.dart';
 import 'package:obtainium/core/logging/app_logger.dart';
 import 'package:obtainium/providers/document_tree_bridge.dart';
 import 'package:obtainium/providers/source_provider.dart';
+import 'package:obtainium/services/server_sync_service.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_storage/shared_storage.dart' as saf;
 
-const String obtainiumTempId = 'imranr98_obtainium_github.com';
-const String obtainiumId = 'dev.imranr.obtainium';
-const String obtainiumUrl = 'https://github.com/ImranR98/Obtainium';
+const String obtainiumTempId = 'nikhil914_personal-obtanium_github.com';
+const String obtainiumId = 'dev.nikhil914.personalobtainium';
+const String obtainiumUrl = 'https://github.com/nikhil914/Personal-obtanium';
 
 /// Sentinel stored as the export directory on devices without a document-tree
 /// picker (typically TVs): exports go to `Downloads/Obtainium/` through
@@ -291,6 +292,33 @@ class SettingsProvider with ChangeNotifier {
 
   set checkOnStart(bool checkOnStart) {
     prefs?.setBool('checkOnStart', checkOnStart);
+    notifyListeners();
+  }
+
+  String get serverSyncUrl {
+    return _getString('serverSyncUrl') ?? serverSyncUrlFromBuild;
+  }
+
+  set serverSyncUrl(String url) {
+    prefs?.setString('serverSyncUrl', url.trim());
+    notifyListeners();
+  }
+
+  bool get serverSyncOnStart {
+    return _getBool('serverSyncOnStart') ?? true;
+  }
+
+  set serverSyncOnStart(bool val) {
+    prefs?.setBool('serverSyncOnStart', val);
+    notifyListeners();
+  }
+
+  bool get preferRootWhenAvailable {
+    return _getBool('preferRootWhenAvailable') ?? true;
+  }
+
+  set preferRootWhenAvailable(bool val) {
+    prefs?.setBool('preferRootWhenAvailable', val);
     notifyListeners();
   }
 

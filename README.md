@@ -1,7 +1,53 @@
+# Personal Obtainium
+
+A fork of [Obtainium](https://github.com/ImranR98/Obtainium) (GPL-3.0) for a car head unit running Android 8.0 or newer. It keeps a fixed set of apps installed and up to date from a list on your own server.
+
+## What it adds
+
+- **Server sync.** When the app opens it sends `GET` to your app list URL. Every app on the list is added, installed if it is missing, and updated when its source has a newer release. Settings → Server sync has the URL, a "Sync now" button and the on-open switch.
+- **Root is optional.** Without root, each install or update shows Android's install screen and needs one tap. If the unit is rooted and `su` grants access, the app switches itself to the root installer and installs silently, including background updates. Turn this off with "Use root for silent installs when available".
+- **Own package id** (`dev.nikhil914.personalobtainium`), so it does not clash with upstream Obtainium, and it updates itself from this repository's releases.
+- Apps from the server use "Filter APKs by device architecture" by default, so a release with per-ABI APKs picks the right one on its own.
+
+## The app list
+
+Serve any of these from your server (for example a static file behind nginx on EC2):
+
+```json
+["https://github.com/owner/app-one", "https://github.com/owner/app-two"]
+```
+
+```json
+{"apps": ["https://github.com/owner/app-one", {"url": "https://github.com/owner/app-two", "settings": {"apkFilterRegEx": "arm64"}}]}
+```
+
+or plain text with one link per line (`#` starts a comment). `settings` takes any Obtainium per-app setting key. See [server/apps.example.json](server/apps.example.json). Plain `http://` works too. Any source Obtainium supports can be listed, not just GitHub.
+
+Unauthenticated GitHub API calls are limited to 60 an hour. With many apps, add a GitHub token in Settings → Source-specific.
+
+## Building
+
+GitHub Actions builds APKs on every push and pull request (`.github/workflows/build.yml`). Download them from the run's artifacts.
+
+- Set the repository variable `SERVER_SYNC_URL` (Settings → Secrets and variables → Actions → Variables) to bake your list URL into the build, so a fresh install syncs with no setup.
+- For installable builds that can update each other, create a keystore once and add it as secrets:
+
+  ```bash
+  keytool -genkeypair -keystore release.jks -alias personal -keyalg RSA -keysize 2048 -validity 10000
+  base64 -w0 release.jks   # paste into the KEYSTORE_BASE64 secret
+  ```
+
+  Then add `KEYSTORE_PASSWORD`, `KEY_ALIAS` (`personal`) and `KEY_PASSWORD`. Without them, CI signs with a throwaway key so you can still test, but the next build cannot update over it.
+- Every push to `main` publishes a GitHub release tagged `v<version>` from `pubspec.yaml`, if that release doesn't exist yet. To ship a new release, bump `version:` (for example `1.7.4+2362`). You can also run the workflow by hand with "Publish a GitHub release" ticked. The app tracks these releases to update itself.
+
+The rest of this README is upstream Obtainium's.
+
+---
+
 <!-- <div align="center"><a href="https://github.com/Safouene1/support-palestine-banner/blob/master/Markdown-pages/Support.md"><img src="https://raw.githubusercontent.com/Safouene1/support-palestine-banner/master/banner-support.svg" alt="Support Palestine" style="width: 100%;"></a></div> -->
 <!-- Banner temporarily removed for reasons, will re-enable or replace shortly -->
 
-# ![Obtainium Icon](./assets/graphics/icon_small.png) Obtainium
+## ![Obtainium Icon](./assets/graphics/icon_small.png) Obtainium (upstream)
 
 Get Android app updates straight from the source.
 
