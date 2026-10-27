@@ -1,0 +1,15 @@
+[Unit]
+Description=Personal Obtainium app list server
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/opt/app-list-server
+EnvironmentFile=/opt/app-list-server/.env
+ExecStart=/usr/bin/node /opt/app-list-server/server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
