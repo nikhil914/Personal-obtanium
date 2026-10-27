@@ -6,6 +6,11 @@ on:
     tags: [ "v*" ]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        type: boolean
+        description: Publish a GitHub release for this build
+        default: false
 
 permissions:
   contents: write
@@ -44,7 +49,7 @@ jobs:
             echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.jks
             echo "kind=release" >> "$GITHUB_OUTPUT"
           else
-            if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            if [[ "$GITHUB_REF" == refs/tags/* || "$GITHUB_REF" == refs/heads/main || "${{ inputs.release }}" == "true" ]]; then
               echo "::error::Releases need the KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS and KEY_PASSWORD secrets so every release is signed with the same key."
               exit 1
             fi
@@ -65,10 +70,12 @@ jobs:
           } > android/key.properties
 
       - name: Build APKs
+        id: build
         env:
           SERVER_SYNC_URL: ${{ vars.SERVER_SYNC_URL }}
         run: |
           VERSION=$(grep -oP "^version: [^\+]+" pubspec.yaml | tail -c +10)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           flutter build apk --release --flavor normal --dart-define=SERVER_SYNC_URL="$SERVER_SYNC_URL"
           flutter build apk --release --flavor normal --split-per-abi --dart-define=SERVER_SYNC_URL="$SERVER_SYNC_URL"
           mkdir -p dist
@@ -86,7 +93,13 @@ jobs:
           path: dist/*.apk
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'push' && github.ref == 'refs/heads/main') || inputs.release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.apk --title "$GITHUB_REF_NAME" --generate-notes
+          TAG: v${{ steps.build.outputs.version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists. Bump version in pubspec.yaml to publish a new one."
+          else
+            gh release create "$TAG" dist/*.apk --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+          fi

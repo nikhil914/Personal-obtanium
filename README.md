@@ -38,7 +38,7 @@ GitHub Actions builds APKs on every push and pull request (`.github/workflows/bu
   ```
 
   Then add `KEYSTORE_PASSWORD`, `KEY_ALIAS` (`personal`) and `KEY_PASSWORD`. Without them, CI signs with a throwaway key so you can still test, but the next build cannot update over it.
-- To publish a release, bump `version:` in `pubspec.yaml` (for example `1.7.4+2362`) and push the matching tag (`v1.7.4`). The app tracks these releases to update itself, so the tag must match the version name.
+- Every push to `main` publishes a GitHub release tagged `v<version>` from `pubspec.yaml`, if that release doesn't exist yet. To ship a new release, bump `version:` (for example `1.7.4+2362`). You can also run the workflow by hand with "Publish a GitHub release" ticked. The app tracks these releases to update itself.
 
 The rest of this README is upstream Obtainium's.
 
