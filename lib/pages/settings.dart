@@ -533,6 +533,14 @@ class _SettingsPageState extends State<SettingsPage> {
         onChanged: (value) => settingsProvider.preferRootWhenAvailable = value,
         helpWidgets: [Text(tr('preferRootWhenAvailableHelp'))],
       ),
+      _caption(
+        context,
+        tr(
+          settingsProvider.installerMode == InstallerMode.root.name
+              ? 'currentInstallerRoot'
+              : 'currentInstallerOther',
+        ),
+      ),
       CardTile(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         child: SizedBox(

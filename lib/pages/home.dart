@@ -62,8 +62,7 @@ class _HomePageState extends State<HomePage> {
         await settingsProvider.initializeSettings();
         if (!mounted) return;
       }
-      if (settingsProvider.serverSyncOnStart &&
-          settingsProvider.serverSyncUrl.isNotEmpty) {
+      if (settingsProvider.serverSyncOnStart) {
         unawaited(runServerSync(context));
       }
     });

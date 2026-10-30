@@ -1,5 +1,8 @@
 {
     "APKLinkHash": "Хеш посилання на APK",
+    "autoInstallSummary": "{} apps installed or updated",
+    "currentInstallerOther": "No root access: Android asks for one tap per install",
+    "currentInstallerRoot": "Root access granted: installs are silent",
     "GHReqPrefix": "екземпляр 'sky22333/hubproxy' для запитів на GitHub",
     "about": "Про програму",
     "actionBanner": "Action banner",

@@ -4,7 +4,7 @@ A fork of [Obtainium](https://github.com/ImranR98/Obtainium) (GPL-3.0) for a car
 
 ## What it adds
 
-- **Server sync.** When the app opens it sends `GET` to your app list URL. Every app on the list is added, installed if it is missing, and updated when its source has a newer release. Settings → Server sync has the URL, a "Sync now" button and the on-open switch.
+- **Install and update on open.** Every time the app opens it installs any tracked app that is missing and updates the rest, whether you added them by hand or a server listed them. If an app list URL is set, it first sends `GET` to it and adds every listed app. Settings → Server sync has the URL, an "Install and update now" button and the on-open switch.
 - **Root is optional.** Without root, each install or update shows Android's install screen and needs one tap. If the unit is rooted and `su` grants access, the app switches itself to the root installer and installs silently, including background updates. Turn this off with "Use root for silent installs when available".
 - **Own package id** (`dev.nikhil914.personalobtainium`), so it does not clash with upstream Obtainium, and it updates itself from this repository's releases.
 - Apps from the server use "Filter APKs by device architecture" by default, so a release with per-ABI APKs picks the right one on its own.

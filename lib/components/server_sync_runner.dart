@@ -19,26 +19,25 @@ Future<ServerSyncResult?> runServerSync(
   try {
     final result = await appsProvider.syncFromServer(context: context);
     if (!context.mounted) return result;
-    if (result == null) {
-      if (reportWhenNothingToDo) {
-        showMessage(tr('serverSyncUrlNotSet'), context);
-      }
-      return null;
-    }
     if (result.hasErrors) {
       showError(result.errors, context);
     } else if (result.addedIds.isNotEmpty ||
         result.queuedIds.isNotEmpty ||
         reportWhenNothingToDo) {
       showMessage(
-        tr(
-          'serverSyncSummary',
-          args: [
-            result.listed.toString(),
-            result.addedIds.length.toString(),
-            result.installedIds.length.toString(),
-          ],
-        ),
+        result.fromServer
+            ? tr(
+                'serverSyncSummary',
+                args: [
+                  result.listed.toString(),
+                  result.addedIds.length.toString(),
+                  result.installedIds.length.toString(),
+                ],
+              )
+            : tr(
+                'autoInstallSummary',
+                args: [result.installedIds.length.toString()],
+              ),
         context,
       );
     }

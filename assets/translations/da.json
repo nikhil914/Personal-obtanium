@@ -1,5 +1,8 @@
 {
     "APKLinkHash": "Hash for APK-link",
+    "autoInstallSummary": "{} apps installed or updated",
+    "currentInstallerOther": "No root access: Android asks for one tap per install",
+    "currentInstallerRoot": "Root access granted: installs are silent",
     "GHReqPrefix": "'sky22333/hubproxy'-instans til GitHub-anmodninger",
     "about": "Om",
     "actionBanner": "Action banner",

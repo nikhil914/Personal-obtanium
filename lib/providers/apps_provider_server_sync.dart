@@ -11,6 +11,7 @@ import 'package:obtainium/providers/source_provider.dart';
 import 'package:obtainium/services/server_sync_service.dart';
 
 class ServerSyncResult {
+  final bool fromServer;
   final int listed;
   final List<String> addedIds;
   final List<String> queuedIds;
@@ -19,6 +20,7 @@ class ServerSyncResult {
   final MultiAppMultiError errors;
 
   const ServerSyncResult({
+    required this.fromServer,
     required this.listed,
     required this.addedIds,
     required this.queuedIds,
@@ -70,22 +72,23 @@ extension AppsProviderServerSync on AppsProvider {
     return false;
   }
 
-  Future<ServerSyncResult?> syncFromServer({
+  Future<ServerSyncResult> syncFromServer({
     BuildContext? context,
     List<ServerAppEntry>? entries,
   }) async {
     final url = settingsProvider.serverSyncUrl;
-    if (entries == null) {
-      if (url.isEmpty) return null;
-      entries = await fetchServerAppList(url);
-    }
+    final fromServer = entries != null || url.isNotEmpty;
+    entries ??= url.isEmpty ? const [] : await fetchServerAppList(url);
     AppLogger.info('Server sync: ${entries.length} apps listed by the server.');
     await waitForAppsToLoad();
     final usingRoot = await applyRootPreference();
     final errors = MultiAppMultiError();
     final sourceProvider = SourceProvider();
-    final managedIds = <String>{};
-    final existingIds = <String>{};
+    final existingIds = apps.values
+        .where((e) => !e.app.disabled)
+        .map((e) => e.app.id)
+        .toSet();
+    final managedIds = {...existingIds};
     final toFetch = <ServerAppEntry, AppSource>{};
 
     for (final entry in entries) {
@@ -162,6 +165,7 @@ extension AppsProviderServerSync on AppsProvider {
 
     final queuedIds = findAppIdsWithPendingUpdates()
         .where(managedIds.contains)
+        .where((id) => !apps[id]!.app.settings.getBool('trackOnly'))
         .toList();
     var installedIds = <String>[];
     if (queuedIds.isNotEmpty) {
@@ -181,6 +185,7 @@ extension AppsProviderServerSync on AppsProvider {
     }
 
     return ServerSyncResult(
+      fromServer: fromServer,
       listed: entries.length,
       addedIds: addedIds,
       queuedIds: queuedIds,

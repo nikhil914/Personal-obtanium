@@ -1,5 +1,8 @@
 {
     "APKLinkHash": "APK 링크 해시",
+    "autoInstallSummary": "{} apps installed or updated",
+    "currentInstallerOther": "No root access: Android asks for one tap per install",
+    "currentInstallerRoot": "Root access granted: installs are silent",
     "GHReqPrefix": "GitHub 요청을 위한 'sky22333/hubproxy' 인스턴스",
     "about": "정보",
     "actionBanner": "동작 배너",

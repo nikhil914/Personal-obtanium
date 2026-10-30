@@ -1,5 +1,8 @@
 {
     "APKLinkHash": "APK 連結雜湊",
+    "autoInstallSummary": "{} apps installed or updated",
+    "currentInstallerOther": "No root access: Android asks for one tap per install",
+    "currentInstallerRoot": "Root access granted: installs are silent",
     "GHReqPrefix": "用於 GitHub 要求的「sky22333/hubproxy」執行個體",
     "about": "關於",
     "actionBanner": "Action banner",
