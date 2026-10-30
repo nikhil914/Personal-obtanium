@@ -5,6 +5,7 @@ import 'package:app_links/app_links.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:obtainium/components/generated_form_renderer.dart';
+import 'package:obtainium/components/server_sync_runner.dart';
 import 'package:obtainium/components/ui_widgets.dart';
 import 'package:obtainium/custom_errors.dart';
 import 'package:obtainium/pages/app.dart';
@@ -57,6 +58,13 @@ class _HomePageState extends State<HomePage> {
       await showWelcomeDialogs();
       if (!mounted) return;
       unawaited(initDeepLinks());
+      if (settingsProvider.prefs == null) {
+        await settingsProvider.initializeSettings();
+        if (!mounted) return;
+      }
+      if (settingsProvider.serverSyncOnStart) {
+        unawaited(runServerSync(context));
+      }
     });
   }
 
